@@ -126,50 +126,68 @@ def resolve_requested_provider(requested: Optional[str] = None) -> str:
 
 
 def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, Any]]:
+    """Resolve a named custom provider from config.yaml.
+
+    Priority: custom_providers in config.yaml are checked FIRST, before any
+    built-in provider handling. This ensures user-defined configurations
+    take precedence over built-in defaults.
+
+    Args:
+        requested_provider: The provider name or 'custom:<name>' key to look up.
+
+    Returns:
+        A dict with provider configuration if found, None otherwise.
+    """
     requested_norm = _normalize_custom_provider_name(requested_provider or "")
     if not requested_norm or requested_norm == "custom":
         return None
 
-    # Raw names should only map to custom providers when they are not already
-    # valid built-in providers or aliases. Explicit menu keys like
-    # ``custom:local`` always target the saved custom provider.
     if requested_norm == "auto":
         return None
+
+    # Determine the lookup name: strip 'custom:' prefix if present
+    lookup_name = requested_norm
+    if requested_norm.startswith("custom:"):
+        lookup_name = requested_norm[7:]  # Remove 'custom:' prefix
+
+    # PRIORITY: Check custom_providers in config.yaml FIRST
+    config = load_config()
+    custom_providers = config.get("custom_providers")
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            base_url = entry.get("base_url")
+            if not isinstance(name, str) or not isinstance(base_url, str):
+                continue
+            name_norm = _normalize_custom_provider_name(name)
+            menu_key = f"custom:{name_norm}"
+            # Match by name or by 'custom:<name>' key
+            if lookup_name in {name_norm, menu_key}:
+                result = {
+                    "name": name.strip(),
+                    "base_url": base_url.strip(),
+                    "api_key": str(entry.get("api_key", "") or "").strip(),
+                }
+                api_mode = _parse_api_mode(entry.get("api_mode"))
+                if api_mode:
+                    result["api_mode"] = api_mode
+                return result
+
+    # FALLBACK: Only check built-in providers if no custom provider matched.
+    # For explicit 'custom:' prefixed requests, we don't fall back to built-ins.
     if not requested_norm.startswith("custom:"):
         try:
             auth_mod.resolve_provider(requested_norm)
         except AuthError:
             pass
         else:
+            # Built-in provider exists, return None to let normal resolution handle it
             return None
 
-    config = load_config()
-    custom_providers = config.get("custom_providers")
-    if not isinstance(custom_providers, list):
-        return None
-
-    for entry in custom_providers:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
-        base_url = entry.get("base_url")
-        if not isinstance(name, str) or not isinstance(base_url, str):
-            continue
-        name_norm = _normalize_custom_provider_name(name)
-        menu_key = f"custom:{name_norm}"
-        if requested_norm not in {name_norm, menu_key}:
-            continue
-        result = {
-            "name": name.strip(),
-            "base_url": base_url.strip(),
-            "api_key": str(entry.get("api_key", "") or "").strip(),
-        }
-        api_mode = _parse_api_mode(entry.get("api_mode"))
-        if api_mode:
-            result["api_mode"] = api_mode
-        return result
-
     return None
+
 
 
 def _resolve_named_custom_runtime(
