@@ -6,7 +6,7 @@
 # Uses uv for fast Python provisioning and package management.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/nelohenriq/hermes-agent-plus/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/nelohenriq/hermes-agent-plus/master/scripts/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
@@ -140,7 +140,7 @@ detect_os() {
             OS="windows"
             DISTRO="windows"
             log_error "Windows detected. Please use the PowerShell installer:"
-            log_info "  irm https://raw.githubusercontent.com/nelohenriq/hermes-agent-plus/main/scripts/install.ps1 | iex"
+            log_info "  irm https://raw.githubusercontent.com/nelohenriq/hermes-agent-plus/master/scripts/install.ps1 | iex"
             exit 1
             ;;
         *)
