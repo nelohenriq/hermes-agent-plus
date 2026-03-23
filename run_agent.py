@@ -1622,34 +1622,6 @@ class AIAgent:
         t = threading.Thread(target=_run_review, daemon=True, name="bg-review")
         t.start()
 
-    def _initialize_conversation(self, user_message, system_message, conversation_history, task_id, stream_callback, persist_user_message):
-        if conversation_history:
-            messages = list(conversation_history)
-        else:
-            messages = []
-        if system_message:
-            messages.insert(0, {"role": "system", "content": system_message})
-        messages.append({"role": "user", "content": user_message})
-        active_system_prompt = system_message or ""
-        effective_task_id = task_id or str(uuid.uuid4())
-        current_turn_user_idx = len(messages) - 1
-        _should_review_memory = False
-        original_user_message = user_message
-        return messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message
-
-    def _perform_preflight_compression(self, messages, active_system_prompt, system_message, effective_task_id):
-        # Stub for compression
-        return messages, active_system_prompt
-
-    def _run_conversation_loop(self, messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message, sync_honcho):
-        # Stub for loop
-        return {
-            "final_response": "Stub response",
-            "messages": messages,
-            "api_calls": 1,
-            "completed": True
-        }
-
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
         """Rewrite the current-turn user message before persistence/return.
 
@@ -5569,213 +5541,213 @@ class AIAgent:
             final_response = f"I reached the maximum iterations ({self.max_iterations}) but couldn't summarize. Error: {str(e)}"
 
         return final_response
-def _initialize_conversation(
-    self,
-    user_message: str,
-    system_message: Optional[str] = None,
-    conversation_history: Optional[List[Dict[str, Any]]] = None,
-    task_id: Optional[str] = None,
-    stream_callback: Optional[Callable] = None,
-    persist_user_message: Optional[str] = None,
-) -> tuple:
-    """
-    Initialize conversation state and prepare messages.
-
-    Returns:
-        Tuple of (messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message)
-    """
-    # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
-    # Installed once, transparent when streams are healthy, prevents crash on write.
-    _install_safe_stdio()
-
-    # Store stream callback for _interruptible_api_call to pick up
-    self._stream_callback = stream_callback
-    self._persist_user_message_idx = None
-    self._persist_user_message_override = persist_user_message
-    # Generate unique task_id if not provided to isolate VMs between concurrent tasks
-    effective_task_id = task_id or str(uuid.uuid4())
-
-    # Reset retry counters and iteration budget at the start of each turn
-    # so subagent usage from a previous turn doesn't eat into the next one.
-    self._invalid_tool_retries = 0
-    self._invalid_json_retries = 0
-    self._empty_content_retries = 0
-    self._incomplete_scratchpad_retries = 0
-    self._codex_incomplete_retries = 0
-    self._last_content_with_tools = None
-    self._mute_post_response = False
-    # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
-    # They are initialized in __init__ and must persist across run_conversation
-    # calls so that nudge logic accumulates correctly in CLI mode.
-    self.iteration_budget = IterationBudget(self.max_iterations)
-
-    # Initialize conversation (copy to avoid mutating the caller's list)
-    messages = list(conversation_history) if conversation_history else []
-
-    # Hydrate todo store from conversation history (gateway creates a fresh
-    # AIAgent per message, so the in-memory store is empty -- we need to
-    # recover the todo state from the most recent todo tool response in history)
-    if conversation_history and not self._todo_store.has_items():
-        self._hydrate_todo_store(conversation_history)
-
-    # Prefill messages (few-shot priming) are injected at API-call time only,
-    # never stored in the messages list. This keeps them ephemeral: they won't
-    # be saved to session DB, session logs, or batch trajectories, but they're
-    # automatically re-applied on every API call (including session continuations).
-
-    # Track user turns for memory flush and periodic nudge logic
-    self._user_turn_count += 1
-
-    # Preserve the original user message (no nudge injection).
-    # Honcho should receive the actual user input, not system nudges.
-    original_user_message = persist_user_message if persist_user_message is not None else user_message
-
-    # Track memory nudge trigger (turn-based, checked here).
-    # Skill trigger is checked AFTER the agent loop completes, based on
-    # how many tool iterations THIS turn used.
-    _should_review_memory = False
-    if (self._memory_nudge_interval > 0
-            and "memory" in self.valid_tool_names
-            and self._memory_store):
-        self._turns_since_memory += 1
-        if self._turns_since_memory >= self._memory_nudge_interval:
-            _should_review_memory = True
-            self._turns_since_memory = 0
-
-    # Honcho prefetch consumption:
-    # - First turn: bake into cached system prompt (stable for the session).
-    # - Later turns: attach recall to the current-turn user message at
-    #   API-call time only (never persisted to history / session DB).
-    #
-    # This keeps the system-prefix cache stable while still allowing turn N
-    # to consume background prefetch results from turn N-1.
-    self._honcho_context = ""
-    self._honcho_turn_context = ""
-    _recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
-    if self._honcho and self._honcho_session_key and _recall_mode != "tools":
-        try:
-            prefetched_context = self._honcho_prefetch(original_user_message)
-            if prefetched_context:
-                if not conversation_history:
-                    self._honcho_context = prefetched_context
-                else:
-                    self._honcho_turn_context = prefetched_context
-        except Exception as e:
-            logger.debug("Honcho prefetch failed (non-fatal): %s", e)
-
-    # Add user message
-    user_msg = {"role": "user", "content": user_message}
-    messages.append(user_msg)
-    current_turn_user_idx = len(messages) - 1
-    self._persist_user_message_idx = current_turn_user_idx
-
-    if not self.quiet_mode:
-        self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
-
-    # ── System prompt (cached per session for prefix caching) ──
-    # Built once on first call, reused for all subsequent calls.
-    # Only rebuilt after context compression events (which invalidate
-    # the cache and reload memory from disk).
-    #
-    # For continuing sessions (gateway creates a fresh AIAgent per
-    # message), we load the stored system prompt from the session DB
-    # instead of rebuilding.  Rebuilding would pick up memory changes
-    # from disk that the model already knows about (it wrote them!),
-    # producing a different system prompt and breaking the Anthropic
-    # prefix cache.
-    if self._cached_system_prompt is None:
-        stored_prompt = None
-        if conversation_history and self._session_db:
-            try:
-                session_row = self._session_db.get_session(self.session_id)
-                if session_row:
-                    stored_prompt = session_row.get("system_prompt") or None
-            except Exception:
-                pass  # Fall through to build fresh
-
-        if stored_prompt:
-            # Continuing session — reuse the exact system prompt from
-            # the previous turn so the Anthropic cache prefix matches.
-            self._cached_system_prompt = stored_prompt
-        else:
-            # First turn of a new session — build from scratch.
-            self._cached_system_prompt = self._build_system_prompt(system_message)
-            # Bake Honcho context into the prompt so it's stable for
-            # the entire session (not re-fetched per turn).
-            if self._honcho_context:
-                self._cached_system_prompt = (
-                    self._cached_system_prompt + "\n\n" + self._honcho_context
-                ).strip()
-            # Store the system prompt snapshot in SQLite
-            if self._session_db:
-                try:
-                    self._session_db.update_system_prompt(self.session_id, self._cached_system_prompt)
-                except Exception as e:
-                    logger.debug("Session DB update_system_prompt failed: %s", e)
-
-    active_system_prompt = self._cached_system_prompt
-    return messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message
-
-    def _perform_preflight_compression(
+    def _initialize_conversation(
         self,
-        messages: List[Dict[str, Any]],
-        active_system_prompt: str,
-        system_message: Optional[str],
-        effective_task_id: str,
+        user_message: str,
+        system_message: Optional[str] = None,
+        conversation_history: Optional[List[Dict[str, Any]]] = None,
+        task_id: Optional[str] = None,
+        stream_callback: Optional[Callable] = None,
+        persist_user_message: Optional[str] = None,
     ) -> tuple:
         """
-        Perform preflight context compression if needed.
+        Initialize conversation state and prepare messages.
 
         Returns:
-            Tuple of (messages, active_system_prompt)
+            Tuple of (messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message)
         """
-        # ── Preflight context compression ──
-        # Before entering the main loop, check if the loaded conversation
-        # history already exceeds the model's context threshold.  This handles
-        # cases where a user switches to a model with a smaller context window
-        # while having a large existing session — compress proactively rather
-        # than waiting for an API error (which might be caught as a non-retryable
-        # 4xx and abort the request entirely).
-        if (
-            self.compression_enabled
-            and self.context_compressor
-            and len(messages) > self.context_compressor.protect_first_n
-                                + self.context_compressor.protect_last_n + 1
-        ):
-            _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
-            _msg_tok_est = estimate_messages_tokens_rough(messages)
-            _preflight_tokens = _sys_tok_est + _msg_tok_est
+        # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
+        # Installed once, transparent when streams are healthy, prevents crash on write.
+        _install_safe_stdio()
 
-            if _preflight_tokens >= self.context_compressor.threshold_tokens:
-                logger.info(
-                    "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
-                    f"{_preflight_tokens:,}",
-                    f"{self.context_compressor.threshold_tokens:,}",
-                    self.model,
-                    f"{self.context_compressor.context_length:,}",
-                )
-                if not self.quiet_mode:
-                    self._safe_print(
-                        f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                        f">= {self.context_compressor.threshold_tokens:,} threshold"
+        # Store stream callback for _interruptible_api_call to pick up
+        self._stream_callback = stream_callback
+        self._persist_user_message_idx = None
+        self._persist_user_message_override = persist_user_message
+        # Generate unique task_id if not provided to isolate VMs between concurrent tasks
+        effective_task_id = task_id or str(uuid.uuid4())
+
+        # Reset retry counters and iteration budget at the start of each turn
+        # so subagent usage from a previous turn doesn't eat into the next one.
+        self._invalid_tool_retries = 0
+        self._invalid_json_retries = 0
+        self._empty_content_retries = 0
+        self._incomplete_scratchpad_retries = 0
+        self._codex_incomplete_retries = 0
+        self._last_content_with_tools = None
+        self._mute_post_response = False
+        # NOTE: _turns_since_memory and _iters_since_skill are NOT reset here.
+        # They are initialized in __init__ and must persist across run_conversation
+        # calls so that nudge logic accumulates correctly in CLI mode.
+        self.iteration_budget = IterationBudget(self.max_iterations)
+
+        # Initialize conversation (copy to avoid mutating the caller's list)
+        messages = list(conversation_history) if conversation_history else []
+
+        # Hydrate todo store from conversation history (gateway creates a fresh
+        # AIAgent per message, so the in-memory store is empty -- we need to
+        # recover the todo state from the most recent todo tool response in history)
+        if conversation_history and not self._todo_store.has_items():
+            self._hydrate_todo_store(conversation_history)
+
+        # Prefill messages (few-shot priming) are injected at API-call time only,
+        # never stored in the messages list. This keeps them ephemeral: they won't
+        # be saved to session DB, session logs, or batch trajectories, but they're
+        # automatically re-applied on every API call (including session continuations).
+
+        # Track user turns for memory flush and periodic nudge logic
+        self._user_turn_count += 1
+
+        # Preserve the original user message (no nudge injection).
+        # Honcho should receive the actual user input, not system nudges.
+        original_user_message = persist_user_message if persist_user_message is not None else user_message
+
+        # Track memory nudge trigger (turn-based, checked here).
+        # Skill trigger is checked AFTER the agent loop completes, based on
+        # how many tool iterations THIS turn used.
+        _should_review_memory = False
+        if (self._memory_nudge_interval > 0
+                and "memory" in self.valid_tool_names
+                and self._memory_store):
+            self._turns_since_memory += 1
+            if self._turns_since_memory >= self._memory_nudge_interval:
+                _should_review_memory = True
+                self._turns_since_memory = 0
+
+        # Honcho prefetch consumption:
+        # - First turn: bake into cached system prompt (stable for the session).
+        # - Later turns: attach recall to the current-turn user message at
+        #   API-call time only (never persisted to history / session DB).
+        #
+        # This keeps the system-prefix cache stable while still allowing turn N
+        # to consume background prefetch results from turn N-1.
+        self._honcho_context = ""
+        self._honcho_turn_context = ""
+        _recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
+        if self._honcho and self._honcho_session_key and _recall_mode != "tools":
+            try:
+                prefetched_context = self._honcho_prefetch(original_user_message)
+                if prefetched_context:
+                    if not conversation_history:
+                        self._honcho_context = prefetched_context
+                    else:
+                        self._honcho_turn_context = prefetched_context
+            except Exception as e:
+                logger.debug("Honcho prefetch failed (non-fatal): %s", e)
+
+        # Add user message
+        user_msg = {"role": "user", "content": user_message}
+        messages.append(user_msg)
+        current_turn_user_idx = len(messages) - 1
+        self._persist_user_message_idx = current_turn_user_idx
+
+        if not self.quiet_mode:
+            self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
+
+        # ── System prompt (cached per session for prefix caching) ──
+        # Built once on first call, reused for all subsequent calls.
+        # Only rebuilt after context compression events (which invalidate
+        # the cache and reload memory from disk).
+        #
+        # For continuing sessions (gateway creates a fresh AIAgent per
+        # message), we load the stored system prompt from the session DB
+        # instead of rebuilding.  Rebuilding would pick up memory changes
+        # from disk that the model already knows about (it wrote them!),
+        # producing a different system prompt and breaking the Anthropic
+        # prefix cache.
+        if self._cached_system_prompt is None:
+            stored_prompt = None
+            if conversation_history and self._session_db:
+                try:
+                    session_row = self._session_db.get_session(self.session_id)
+                    if session_row:
+                        stored_prompt = session_row.get("system_prompt") or None
+                except Exception:
+                    pass  # Fall through to build fresh
+
+            if stored_prompt:
+                # Continuing session — reuse the exact system prompt from
+                # the previous turn so the Anthropic cache prefix matches.
+                self._cached_system_prompt = stored_prompt
+            else:
+                # First turn of a new session — build from scratch.
+                self._cached_system_prompt = self._build_system_prompt(system_message)
+                # Bake Honcho context into the prompt so it's stable for
+                # the entire session (not re-fetched per turn).
+                if self._honcho_context:
+                    self._cached_system_prompt = (
+                        self._cached_system_prompt + "\n\n" + self._honcho_context
+                    ).strip()
+                # Store the system prompt snapshot in SQLite
+                if self._session_db:
+                    try:
+                        self._session_db.update_system_prompt(self.session_id, self._cached_system_prompt)
+                    except Exception as e:
+                        logger.debug("Session DB update_system_prompt failed: %s", e)
+
+        active_system_prompt = self._cached_system_prompt
+        return messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message
+
+        def _perform_preflight_compression(
+            self,
+            messages: List[Dict[str, Any]],
+            active_system_prompt: str,
+            system_message: Optional[str],
+            effective_task_id: str,
+        ) -> tuple:
+            """
+            Perform preflight context compression if needed.
+
+            Returns:
+                Tuple of (messages, active_system_prompt)
+            """
+            # ── Preflight context compression ──
+            # Before entering the main loop, check if the loaded conversation
+            # history already exceeds the model's context threshold.  This handles
+            # cases where a user switches to a model with a smaller context window
+            # while having a large existing session — compress proactively rather
+            # than waiting for an API error (which might be caught as a non-retryable
+            # 4xx and abort the request entirely).
+            if (
+                self.compression_enabled
+                and self.context_compressor
+                and len(messages) > self.context_compressor.protect_first_n
+                                    + self.context_compressor.protect_last_n + 1
+            ):
+                _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
+                _msg_tok_est = estimate_messages_tokens_rough(messages)
+                _preflight_tokens = _sys_tok_est + _msg_tok_est
+
+                if _preflight_tokens >= self.context_compressor.threshold_tokens:
+                    logger.info(
+                        "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
+                        f"{_preflight_tokens:,}",
+                        f"{self.context_compressor.threshold_tokens:,}",
+                        self.model,
+                        f"{self.context_compressor.context_length:,}",
                     )
-                # May need multiple passes for very large sessions with small
-                # context windows (each pass summarises the middle N turns).
-                for _pass in range(3):
-                    _orig_len = len(messages)
-                    messages, active_system_prompt = self._compress_context(
-                        messages, system_message, approx_tokens=_preflight_tokens,
-                        task_id=effective_task_id,
-                    )
-                    if len(messages) >= _orig_len:
-                        break  # Cannot compress further
-                    # Re-estimate after compression
-                    _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
-                    _msg_tok_est = estimate_messages_tokens_rough(messages)
-                    _preflight_tokens = _sys_tok_est + _msg_tok_est
-                    if _preflight_tokens < self.context_compressor.threshold_tokens:
-                        break  # Under threshold
-        return messages, active_system_prompt
+                    if not self.quiet_mode:
+                        self._safe_print(
+                            f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
+                            f">= {self.context_compressor.threshold_tokens:,} threshold"
+                        )
+                    # May need multiple passes for very large sessions with small
+                    # context windows (each pass summarises the middle N turns).
+                    for _pass in range(3):
+                        _orig_len = len(messages)
+                        messages, active_system_prompt = self._compress_context(
+                            messages, system_message, approx_tokens=_preflight_tokens,
+                            task_id=effective_task_id,
+                        )
+                        if len(messages) >= _orig_len:
+                            break  # Cannot compress further
+                        # Re-estimate after compression
+                        _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
+                        _msg_tok_est = estimate_messages_tokens_rough(messages)
+                        _preflight_tokens = _sys_tok_est + _msg_tok_est
+                        if _preflight_tokens < self.context_compressor.threshold_tokens:
+                            break  # Under threshold
+            return messages, active_system_prompt
 
 
     def _run_conversation_loop(
