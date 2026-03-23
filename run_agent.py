@@ -5688,66 +5688,66 @@ class AIAgent:
         active_system_prompt = self._cached_system_prompt
         return messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message
 
-        def _perform_preflight_compression(
-            self,
-            messages: List[Dict[str, Any]],
-            active_system_prompt: str,
-            system_message: Optional[str],
-            effective_task_id: str,
-        ) -> tuple:
-            """
-            Perform preflight context compression if needed.
+    def _perform_preflight_compression(
+        self,
+        messages: List[Dict[str, Any]],
+        active_system_prompt: str,
+        system_message: Optional[str],
+        effective_task_id: str,
+    ) -> tuple:
+        """
+        Perform preflight context compression if needed.
 
-            Returns:
-                Tuple of (messages, active_system_prompt)
-            """
-            # ── Preflight context compression ──
-            # Before entering the main loop, check if the loaded conversation
-            # history already exceeds the model's context threshold.  This handles
-            # cases where a user switches to a model with a smaller context window
-            # while having a large existing session — compress proactively rather
-            # than waiting for an API error (which might be caught as a non-retryable
-            # 4xx and abort the request entirely).
-            if (
-                self.compression_enabled
-                and self.context_compressor
-                and len(messages) > self.context_compressor.protect_first_n
-                                    + self.context_compressor.protect_last_n + 1
-            ):
-                _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
-                _msg_tok_est = estimate_messages_tokens_rough(messages)
-                _preflight_tokens = _sys_tok_est + _msg_tok_est
+        Returns:
+            Tuple of (messages, active_system_prompt)
+        """
+        # ── Preflight context compression ──
+        # Before entering the main loop, check if the loaded conversation
+        # history already exceeds the model's context threshold.  This handles
+        # cases where a user switches to a model with a smaller context window
+        # while having a large existing session — compress proactively rather
+        # than waiting for an API error (which might be caught as a non-retryable
+        # 4xx and abort the request entirely).
+        if (
+            self.compression_enabled
+            and self.context_compressor
+            and len(messages) > self.context_compressor.protect_first_n
+                                + self.context_compressor.protect_last_n + 1
+        ):
+            _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
+            _msg_tok_est = estimate_messages_tokens_rough(messages)
+            _preflight_tokens = _sys_tok_est + _msg_tok_est
 
-                if _preflight_tokens >= self.context_compressor.threshold_tokens:
-                    logger.info(
-                        "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
-                        f"{_preflight_tokens:,}",
-                        f"{self.context_compressor.threshold_tokens:,}",
-                        self.model,
-                        f"{self.context_compressor.context_length:,}",
+            if _preflight_tokens >= self.context_compressor.threshold_tokens:
+                logger.info(
+                    "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
+                    f"{_preflight_tokens:,}",
+                    f"{self.context_compressor.threshold_tokens:,}",
+                    self.model,
+                    f"{self.context_compressor.context_length:,}",
+                )
+                if not self.quiet_mode:
+                    self._safe_print(
+                        f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
+                        f">= {self.context_compressor.threshold_tokens:,} threshold"
                     )
-                    if not self.quiet_mode:
-                        self._safe_print(
-                            f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                            f">= {self.context_compressor.threshold_tokens:,} threshold"
-                        )
-                    # May need multiple passes for very large sessions with small
-                    # context windows (each pass summarises the middle N turns).
-                    for _pass in range(3):
-                        _orig_len = len(messages)
-                        messages, active_system_prompt = self._compress_context(
-                            messages, system_message, approx_tokens=_preflight_tokens,
-                            task_id=effective_task_id,
-                        )
-                        if len(messages) >= _orig_len:
-                            break  # Cannot compress further
-                        # Re-estimate after compression
-                        _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
-                        _msg_tok_est = estimate_messages_tokens_rough(messages)
-                        _preflight_tokens = _sys_tok_est + _msg_tok_est
-                        if _preflight_tokens < self.context_compressor.threshold_tokens:
-                            break  # Under threshold
-            return messages, active_system_prompt
+                # May need multiple passes for very large sessions with small
+                # context windows (each pass summarises the middle N turns).
+                for _pass in range(3):
+                    _orig_len = len(messages)
+                    messages, active_system_prompt = self._compress_context(
+                        messages, system_message, approx_tokens=_preflight_tokens,
+                        task_id=effective_task_id,
+                    )
+                    if len(messages) >= _orig_len:
+                        break  # Cannot compress further
+                    # Re-estimate after compression
+                    _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
+                    _msg_tok_est = estimate_messages_tokens_rough(messages)
+                    _preflight_tokens = _sys_tok_est + _msg_tok_est
+                    if _preflight_tokens < self.context_compressor.threshold_tokens:
+                        break  # Under threshold
+        return messages, active_system_prompt
 
 
     def _run_conversation_loop(
