@@ -5,13 +5,37 @@ capabilities of the AIAgent class. Each mixin handles a specific
 concern (conversation, execution, streaming, session), enabling
 clean separation of concerns and easier testing.
 
-Mixins will be composed into AIAgent in Phase 2.
+Mixins are composed into AIAgent using multiple inheritance.
 """
 
-# Placeholder imports - mixins will be added in Phase 2
+# Import ExecutionMixin and its helper functions
+from .execution_mixin import (
+ ExecutionMixin,
+ # Parallelization constants
+ _NEVER_PARALLEL_TOOLS,
+ _PARALLEL_SAFE_TOOLS,
+ _PATH_SCOPED_TOOLS,
+ _MAX_TOOL_WORKERS,
+ # Helper functions
+ _is_destructive_command,
+ _should_parallelize_tool_batch,
+ _extract_parallel_scope_path,
+ _paths_overlap,
+)
+
+# Placeholder imports - other mixins will be added in future phases
 # from .conversation_mixin import ConversationMixin
-# from .execution_mixin import ExecutionMixin
 # from .streaming_mixin import StreamingMixin
 # from .session_mixin import SessionMixin
 
-__all__ = []
+__all__ = [
+ 'ExecutionMixin',
+ '_NEVER_PARALLEL_TOOLS',
+ '_PARALLEL_SAFE_TOOLS',
+ '_PATH_SCOPED_TOOLS',
+ '_MAX_TOOL_WORKERS',
+ '_is_destructive_command',
+ '_should_parallelize_tool_batch',
+ '_extract_parallel_scope_path',
+ '_paths_overlap',
+]
