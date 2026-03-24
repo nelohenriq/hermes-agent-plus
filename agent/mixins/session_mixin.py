@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 class SessionMixin:
     """Mixin providing session management methods for AIAgent."""
 
+    def _client_log_context(self) -> str:
+        """Return a string identifier for logging that describes the current client configuration.
+
+        Used in logging statements to provide context about which client (model/provider/url)
+        was involved in an operation.
+        """
+        model = getattr(self, "model", "unknown")
+        provider = getattr(self, "provider", "unknown")
+        base_url = getattr(self, "base_url", "unknown")
+        # Truncate base_url to avoid verbose logs
+        if base_url and len(base_url) > 50:
+            base_url = base_url[:47] + "..."
+        return f"[model={model}, provider={provider}, base_url={base_url}]"
+
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.
 
