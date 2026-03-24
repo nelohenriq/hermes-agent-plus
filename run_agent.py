@@ -15,7 +15,7 @@ Features:
 
 Usage:
     from run_agent import AIAgent
-    
+
     agent = AIAgent(base_url="http://localhost:30000/v1", model="claude-opus-4-20250514")
     response = agent.run_conversation("Tell me about the latest Python updates")
 """
@@ -28,6 +28,7 @@ import copy
 import hashlib
 import json
 import logging
+
 logger = logging.getLogger(__name__)
 import os
 import random
@@ -48,8 +49,10 @@ from pathlib import Path
 from hermes_cli.env_loader import load_hermes_dotenv
 
 _hermes_home = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
-_project_env = Path(__file__).parent / '.env'
-_loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
+_project_env = Path(__file__).parent / ".env"
+_loaded_env_paths = load_hermes_dotenv(
+    hermes_home=_hermes_home, project_env=_project_env
+)
 if _loaded_env_paths:
     for _env_path in _loaded_env_paths:
         logger.info("Loaded environment variables from %s", _env_path)
@@ -63,20 +66,29 @@ os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
 # Conditional imports for tool system and dependencies
 try:
     # Import our tool system
-    from model_tools import get_tool_definitions, handle_function_call, check_toolset_requirements
+    from model_tools import (
+        get_tool_definitions,
+        handle_function_call,
+        check_toolset_requirements,
+    )
     from tools.terminal_tool import cleanup_vm
     from tools.interrupt import set_interrupt as _set_interrupt
     from tools.browser_tool import cleanup_browser
+
     tools_available = True
 except ImportError as e:
     logger.warning("Tool system not available: %s", e)
+
     # Define stubs for when tools aren't available
     def get_tool_definitions(*args, **kwargs):
         return []
+
     def handle_function_call(*args, **kwargs):
         return json.dumps({"error": "Tool system not available"})
+
     def check_toolset_requirements(*args, **kwargs):
         return {}
+
     cleanup_vm = lambda task_id: None
     _set_interrupt = lambda x: None
     cleanup_browser = lambda task_id: None
@@ -84,6 +96,7 @@ except ImportError as e:
 
 try:
     import requests
+
     requests_available = True
 except ImportError:
     logger.warning("requests not available")
@@ -92,6 +105,7 @@ except ImportError:
 
 try:
     from hermes_constants import OPENROUTER_BASE_URL, OPENROUTER_MODELS_URL
+
     constants_available = True
 except ImportError:
     logger.warning("hermes_constants not available")
@@ -102,30 +116,43 @@ except ImportError:
 # Agent internals extracted to agent/ package for modularity
 try:
     from agent.prompt_builder import (
-        DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
-        MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
+        DEFAULT_AGENT_IDENTITY,
+        PLATFORM_HINTS,
+        MEMORY_GUIDANCE,
+        SESSION_SEARCH_GUIDANCE,
+        SKILLS_GUIDANCE,
     )
     from agent.model_metadata import (
-        fetch_model_metadata, get_model_context_length,
-        estimate_tokens_rough, estimate_messages_tokens_rough,
-        get_next_probe_tier, parse_context_limit_from_error,
+        fetch_model_metadata,
+        get_model_context_length,
+        estimate_tokens_rough,
+        estimate_messages_tokens_rough,
+        get_next_probe_tier,
+        parse_context_limit_from_error,
         save_context_length,
     )
     from agent.context_compressor import ContextCompressor
     from agent.prompt_caching import apply_anthropic_cache_control
-    from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md
+    from agent.prompt_builder import (
+        build_skills_system_prompt,
+        build_context_files_prompt,
+        load_soul_md,
+    )
     from agent.usage_pricing import estimate_usage_cost, normalize_usage
     from agent.display import (
-        KawaiiSpinner, build_tool_preview as _build_tool_preview,
+        KawaiiSpinner,
+        build_tool_preview as _build_tool_preview,
         get_cute_tool_message as _get_cute_tool_message_impl,
         _detect_tool_failure,
         get_tool_emoji as _get_tool_emoji,
     )
     from agent.trajectory import (
-        convert_scratchpad_to_think, has_incomplete_scratchpad,
+        convert_scratchpad_to_think,
+        has_incomplete_scratchpad,
         save_trajectory as _save_trajectory_to_file,
     )
     from utils import atomic_json_write
+
     agent_internals_available = True
 except ImportError as e:
     logger.warning("Agent internals not available: %s", e)
@@ -138,7 +165,9 @@ except ImportError as e:
     fetch_model_metadata = lambda: {}
     get_model_context_length = lambda x: 4096
     estimate_tokens_rough = lambda x: len(x) // 4
-    estimate_messages_tokens_rough = lambda x: sum(estimate_tokens_rough(str(msg.get("content", ""))) for msg in x)
+    estimate_messages_tokens_rough = lambda x: sum(
+        estimate_tokens_rough(str(msg.get("content", ""))) for msg in x
+    )
     get_next_probe_tier = lambda x: 4096
     parse_context_limit_from_error = lambda x: None
     save_context_length = lambda x, y: None
@@ -166,7 +195,14 @@ try:
     from agent.rate_limiter import CoordinatedRateLimiter
     from agent.context_compaction import ContextCompactionManager
     from agent.token_stats import record_context_compaction
-    from agent.token_stats import get_global_stats, record_cache_hit, record_cache_miss, record_rate_limit_wait, record_context_compaction
+    from agent.token_stats import (
+        get_global_stats,
+        record_cache_hit,
+        record_cache_miss,
+        record_rate_limit_wait,
+        record_context_compaction,
+    )
+
     token_efficiency_available = True
 except ImportError as e:
     logger.warning("Token efficiency modules not available: %s", e)
@@ -181,9 +217,15 @@ except ImportError as e:
     record_rate_limit_wait = lambda *args, **kwargs: None
     record_context_compaction = lambda **kwargs: None
     token_efficiency_available = False
-n
+
 # Execution mixin for tool call handling
-from agent.mixins import ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin
+from agent.mixins import (
+    ExecutionMixin,
+    StreamingMixin,
+    SessionMixin,
+    ConversationMixin,
+    ContextMixin,
+)
 
 HONCHO_TOOL_NAMES = {
     "honcho_context",
@@ -295,22 +337,24 @@ class IterationBudget:
 _NEVER_PARALLEL_TOOLS = frozenset({"clarify"})
 
 # Read-only tools with no shared mutable session state.
-_PARALLEL_SAFE_TOOLS = frozenset({
-    "ha_get_state",
-    "ha_list_entities",
-    "ha_list_services",
-    "honcho_context",
-    "honcho_profile",
-    "honcho_search",
-    "read_file",
-    "search_files",
-    "session_search",
-    "skill_view",
-    "skills_list",
-    "vision_analyze",
-    "web_extract",
-    "web_search",
-})
+_PARALLEL_SAFE_TOOLS = frozenset(
+    {
+        "ha_get_state",
+        "ha_list_entities",
+        "ha_list_services",
+        "honcho_context",
+        "honcho_profile",
+        "honcho_search",
+        "read_file",
+        "search_files",
+        "session_search",
+        "skill_view",
+        "skills_list",
+        "vision_analyze",
+        "web_extract",
+        "web_search",
+    }
+)
 
 # File tools can run concurrently when they target independent paths.
 _PATH_SCOPED_TOOLS = frozenset({"read_file", "write_file", "patch"})
@@ -332,7 +376,7 @@ _DESTRUCTIVE_PATTERNS = re.compile(
     re.VERBOSE,
 )
 # Output redirects that overwrite files (> but not >>)
-_REDIRECT_OVERWRITE = re.compile(r'[^>]>[^>]|^>[^>]')
+_REDIRECT_OVERWRITE = re.compile(r"[^>]>[^>]|^>[^>]")
 
 
 def _is_destructive_command(cmd: str) -> bool:
@@ -379,7 +423,9 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
             scoped_path = _extract_parallel_scope_path(tool_name, function_args)
             if scoped_path is None:
                 return False
-            if any(_paths_overlap(scoped_path, existing) for existing in reserved_paths):
+            if any(
+                _paths_overlap(scoped_path, existing) for existing in reserved_paths
+            ):
                 return False
             reserved_paths.append(scoped_path)
             continue
@@ -440,7 +486,13 @@ def _inject_honcho_turn_context(content, turn_context: str):
     return f"{text}\n\n{note}"
 
 
-class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
+class AIAgent(
+    ExecutionMixin,
+    StreamingMixin,
+    SessionMixin,
+    ConversationMixin,
+    ContextMixin,
+):
     """
     AI Agent with tool calling capabilities.
 
@@ -576,7 +628,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
         # When no base_url is provided, the client defaults to OpenRouter, so reflect that here.
         self.base_url = base_url or OPENROUTER_BASE_URL
-        provider_name = provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
+        provider_name = (
+            provider.strip().lower()
+            if isinstance(provider, str) and provider.strip()
+            else None
+        )
         self.provider = provider_name or "openrouter"
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
@@ -584,10 +640,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             self.api_mode = api_mode
         elif self.provider == "openai-codex":
             self.api_mode = "codex_responses"
-        elif (provider_name is None) and "chatgpt.com/backend-api/codex" in self._base_url_lower:
+        elif (
+            provider_name is None
+        ) and "chatgpt.com/backend-api/codex" in self._base_url_lower:
             self.api_mode = "codex_responses"
             self.provider = "openai-codex"
-        elif self.provider == "anthropic" or (provider_name is None and "api.anthropic.com" in self._base_url_lower):
+        elif self.provider == "anthropic" or (
+            provider_name is None and "api.anthropic.com" in self._base_url_lower
+        ):
             self.api_mode = "anthropic_messages"
             self.provider = "anthropic"
         elif self._base_url_lower.rstrip("/").endswith("/anthropic"):
@@ -621,7 +681,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         self.stream_delta_callback = stream_delta_callback
         self.status_callback = status_callback
         self._last_reported_tool = None  # Track for "new tool" mode
-        
+
         # Tool execution state — allows _vprint during tool execution
         # even when stream consumers are registered (no tokens streaming then)
         self._executing_tools = False
@@ -630,12 +690,12 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
         self._client_lock = threading.RLock()
-        
+
         # Subagent delegation state
-        self._delegate_depth = 0        # 0 = top-level agent, incremented for children
-        self._active_children = []      # Running child AIAgents (for interrupt propagation)
+        self._delegate_depth = 0  # 0 = top-level agent, incremented for children
+        self._active_children = []  # Running child AIAgents (for interrupt propagation)
         self._active_children_lock = threading.Lock()
-        
+
         # Store OpenRouter provider preferences
         self.providers_allowed = providers_allowed
         self.providers_ignored = providers_ignored
@@ -647,12 +707,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         # Store toolset filtering options
         self.enabled_toolsets = enabled_toolsets
         self.disabled_toolsets = disabled_toolsets
-        
+
         # Model response configuration
         self.max_tokens = max_tokens  # None = use model default
-        self.reasoning_config = reasoning_config  # None = use default (medium for OpenRouter)
+        self.reasoning_config = (
+            reasoning_config  # None = use default (medium for OpenRouter)
+        )
         self.prefill_messages = prefill_messages or []  # Prefilled conversation turns
-        
+
         # Anthropic prompt caching: auto-enabled for Claude models via OpenRouter.
         # Reduces input costs by ~75% on multi-turn conversations by caching the
         # conversation prefix. Uses system_and_3 strategy (4 breakpoints).
@@ -661,12 +723,12 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         is_native_anthropic = self.api_mode == "anthropic_messages"
         self._use_prompt_caching = (is_openrouter and is_claude) or is_native_anthropic
         self._cache_ttl = "5m"  # Default 5-minute TTL (1.25x write cost)
-        
+
         # Iteration budget pressure: warn the LLM as it approaches max_iterations.
         # Warnings are injected into the last tool result JSON (not as separate
         # messages) so they don't break message structure or invalidate caching.
-        self._budget_caution_threshold = 0.7   # 70% — nudge to start wrapping up
-        self._budget_warning_threshold = 0.9   # 90% — urgent, respond now
+        self._budget_caution_threshold = 0.7  # 70% — nudge to start wrapping up
+        self._budget_warning_threshold = 0.9  # 90% — urgent, respond now
         self._budget_pressure_enabled = True
 
         # Context pressure warnings: notify the USER (not the LLM) as context
@@ -681,78 +743,89 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         # while the root logger is process-global. Re-adding the same errors.log
         # handler would cause each warning/error line to be written multiple times.
         from logging.handlers import RotatingFileHandler
+
         root_logger = logging.getLogger()
         error_log_dir = _hermes_home / "logs"
         error_log_path = error_log_dir / "errors.log"
         resolved_error_log_path = error_log_path.resolve()
         has_errors_log_handler = any(
             isinstance(handler, RotatingFileHandler)
-            and Path(getattr(handler, "baseFilename", "")).resolve() == resolved_error_log_path
+            and Path(getattr(handler, "baseFilename", "")).resolve()
+            == resolved_error_log_path
             for handler in root_logger.handlers
         )
         from agent.redact import RedactingFormatter
+
         if not has_errors_log_handler:
             error_log_dir.mkdir(parents=True, exist_ok=True)
             error_file_handler = RotatingFileHandler(
-                error_log_path, maxBytes=2 * 1024 * 1024, backupCount=2,
+                error_log_path,
+                maxBytes=2 * 1024 * 1024,
+                backupCount=2,
             )
             error_file_handler.setLevel(logging.WARNING)
-            error_file_handler.setFormatter(RedactingFormatter(
-                '%(asctime)s %(levelname)s %(name)s: %(message)s',
-            ))
+            error_file_handler.setFormatter(
+                RedactingFormatter(
+                    "%(asctime)s %(levelname)s %(name)s: %(message)s",
+                )
+            )
             root_logger.addHandler(error_file_handler)
 
         if self.verbose_logging:
             logging.basicConfig(
                 level=logging.DEBUG,
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                datefmt='%H:%M:%S'
+                format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                datefmt="%H:%M:%S",
             )
             for handler in logging.getLogger().handlers:
-                handler.setFormatter(RedactingFormatter(
-                    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    datefmt='%H:%M:%S',
-                ))
+                handler.setFormatter(
+                    RedactingFormatter(
+                        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                        datefmt="%H:%M:%S",
+                    )
+                )
             # Keep third-party libraries at WARNING level to reduce noise
             # We have our own retry and error logging that's more informative
-            logging.getLogger('openai').setLevel(logging.WARNING)
-            logging.getLogger('openai._base_client').setLevel(logging.WARNING)
-            logging.getLogger('httpx').setLevel(logging.WARNING)
-            logging.getLogger('httpcore').setLevel(logging.WARNING)
-            logging.getLogger('asyncio').setLevel(logging.WARNING)
+            logging.getLogger("openai").setLevel(logging.WARNING)
+            logging.getLogger("openai._base_client").setLevel(logging.WARNING)
+            logging.getLogger("httpx").setLevel(logging.WARNING)
+            logging.getLogger("httpcore").setLevel(logging.WARNING)
+            logging.getLogger("asyncio").setLevel(logging.WARNING)
             # Suppress Modal/gRPC related debug spam
-            logging.getLogger('hpack').setLevel(logging.WARNING)
-            logging.getLogger('hpack.hpack').setLevel(logging.WARNING)
-            logging.getLogger('grpc').setLevel(logging.WARNING)
-            logging.getLogger('modal').setLevel(logging.WARNING)
-            logging.getLogger('rex-deploy').setLevel(logging.INFO)  # Keep INFO for sandbox status
+            logging.getLogger("hpack").setLevel(logging.WARNING)
+            logging.getLogger("hpack.hpack").setLevel(logging.WARNING)
+            logging.getLogger("grpc").setLevel(logging.WARNING)
+            logging.getLogger("modal").setLevel(logging.WARNING)
+            logging.getLogger("rex-deploy").setLevel(
+                logging.INFO
+            )  # Keep INFO for sandbox status
             logger.info("Verbose logging enabled (third-party library logs suppressed)")
         else:
             # Set logging to INFO level for important messages only
             logging.basicConfig(
                 level=logging.INFO,
-                format='%(asctime)s - %(levelname)s - %(message)s',
-                datefmt='%H:%M:%S'
+                format="%(asctime)s - %(levelname)s - %(message)s",
+                datefmt="%H:%M:%S",
             )
             # Suppress noisy library logging
-            logging.getLogger('openai').setLevel(logging.ERROR)
-            logging.getLogger('openai._base_client').setLevel(logging.ERROR)
-            logging.getLogger('httpx').setLevel(logging.ERROR)
-            logging.getLogger('httpcore').setLevel(logging.ERROR)
+            logging.getLogger("openai").setLevel(logging.ERROR)
+            logging.getLogger("openai._base_client").setLevel(logging.ERROR)
+            logging.getLogger("httpx").setLevel(logging.ERROR)
+            logging.getLogger("httpcore").setLevel(logging.ERROR)
             if self.quiet_mode:
                 # In quiet mode (CLI default), suppress all tool/infra log
                 # noise. The TUI has its own rich display for status; logger
                 # INFO/WARNING messages just clutter it.
                 for quiet_logger in [
-                    'tools',               # all tools.* (terminal, browser, web, file, etc.)
-                    'minisweagent',         # mini-swe-agent execution backend
-                    'run_agent',            # agent runner internals
-                    'trajectory_compressor',
-                    'cron',                 # scheduler (only relevant in daemon mode)
-                    'hermes_cli',           # CLI helpers
+                    "tools",  # all tools.* (terminal, browser, web, file, etc.)
+                    "minisweagent",  # mini-swe-agent execution backend
+                    "run_agent",  # agent runner internals
+                    "trajectory_compressor",
+                    "cron",  # scheduler (only relevant in daemon mode)
+                    "hermes_cli",  # CLI helpers
                 ]:
                     logging.getLogger(quiet_logger).setLevel(logging.ERROR)
-        
+
         # Internal stream callback (set during streaming TTS).
         # Initialized here so _vprint can reference it before run_conversation.
         self._stream_callback = None
@@ -779,23 +852,34 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         self._anthropic_client = None
 
         if self.api_mode == "anthropic_messages":
-            from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
+            from agent.anthropic_adapter import (
+                build_anthropic_client,
+                resolve_anthropic_token,
+            )
+
             # Only fall back to ANTHROPIC_TOKEN when the provider is actually Anthropic.
             # Other anthropic_messages providers (MiniMax, Alibaba, etc.) must use their own API key.
             # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
             _is_native_anthropic = self.provider == "anthropic"
-            effective_key = (api_key or resolve_anthropic_token() or "") if _is_native_anthropic else (api_key or "")
+            effective_key = (
+                (api_key or resolve_anthropic_token() or "")
+                if _is_native_anthropic
+                else (api_key or "")
+            )
             self.api_key = effective_key
             self._anthropic_api_key = effective_key
             self._anthropic_base_url = base_url
             from agent.anthropic_adapter import _is_oauth_token as _is_oat
+
             self._is_anthropic_oauth = _is_oat(effective_key)
             self._anthropic_client = build_anthropic_client(effective_key, base_url)
             # No OpenAI client needed for Anthropic mode
             self.client = None
             self._client_kwargs = {}
             if not self.quiet_mode:
-                print(f"🤖 AI Agent initialized with model: {self.model} (Anthropic native)")
+                print(
+                    f"🤖 AI Agent initialized with model: {self.model} (Anthropic native)"
+                )
                 if effective_key and len(effective_key) > 12:
                     print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
         else:
@@ -826,16 +910,23 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             else:
                 # No explicit creds — use the centralized provider router
                 from agent.auxiliary_client import resolve_provider_client
+
                 _routed_client, _ = resolve_provider_client(
-                    self.provider or "auto", model=self.model, raw_codex=True)
+                    self.provider or "auto", model=self.model, raw_codex=True
+                )
                 if _routed_client is not None:
                     client_kwargs = {
                         "api_key": _routed_client.api_key,
                         "base_url": str(_routed_client.base_url),
                     }
                     # Preserve any default_headers the router set
-                    if hasattr(_routed_client, '_default_headers') and _routed_client._default_headers:
-                        client_kwargs["default_headers"] = dict(_routed_client._default_headers)
+                    if (
+                        hasattr(_routed_client, "_default_headers")
+                        and _routed_client._default_headers
+                    ):
+                        client_kwargs["default_headers"] = dict(
+                            _routed_client._default_headers
+                        )
                 else:
                     # When the user explicitly chose a non-OpenRouter provider
                     # but no credentials were found, fail fast with a clear
@@ -857,11 +948,13 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                             "X-OpenRouter-Categories": "productivity,cli-agent",
                         },
                     }
-            
+
             self._client_kwargs = client_kwargs  # stored for rebuilding after interrupt
             self.api_key = client_kwargs.get("api_key", "")
             try:
-                self.client = self._create_openai_client(client_kwargs, reason="agent_init", shared=True)
+                self.client = self._create_openai_client(
+                    client_kwargs, reason="agent_init", shared=True
+                )
                 if not self.quiet_mode:
                     print(f"🤖 AI Agent initialized with model: {self.model}")
                     if base_url:
@@ -871,14 +964,18 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     if key_used and key_used != "dummy-key" and len(key_used) > 12:
                         print(f"🔑 Using API key: {key_used[:8]}...{key_used[-4:]}")
                     else:
-                        print(f"⚠️  Warning: API key appears invalid or missing (got: '{key_used[:20] if key_used else 'none'}...')")
+                        print(
+                            f"⚠️  Warning: API key appears invalid or missing (got: '{key_used[:20] if key_used else 'none'}...')"
+                        )
             except Exception as e:
                 raise RuntimeError(f"Failed to initialize OpenAI client: {e}")
-        
+
         # Provider fallback — a single backup model/provider tried when the
         # primary is exhausted (rate-limit, overload, connection failure).
         # Config shape: {"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}
-        self._fallback_model = fallback_model if isinstance(fallback_model, dict) else None
+        self._fallback_model = (
+            fallback_model if isinstance(fallback_model, dict) else None
+        )
         self._fallback_activated = False
         if self._fallback_model:
             fb_p = self._fallback_model.get("provider", "")
@@ -892,7 +989,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             disabled_toolsets=disabled_toolsets,
             quiet_mode=self.quiet_mode,
         )
-        
+
         # Show tool configuration and store valid tool names for validation
         self.valid_tool_names = set()
         if self.tools:
@@ -900,7 +997,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             tool_names = sorted(self.valid_tool_names)
             if not self.quiet_mode:
                 print(f"🛠️  Loaded {len(self.tools)} tools: {', '.join(tool_names)}")
-                
+
                 # Show filtering info if applied
                 if enabled_toolsets:
                     print(f"   ✅ Enabled toolsets: {', '.join(enabled_toolsets)}")
@@ -908,28 +1005,40 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
         elif not self.quiet_mode:
             print("🛠️  No tools loaded (all tools filtered out or unavailable)")
-        
+
         # Check tool requirements
         if self.tools and not self.quiet_mode:
             requirements = check_toolset_requirements()
-            missing_reqs = [name for name, available in requirements.items() if not available]
+            missing_reqs = [
+                name for name, available in requirements.items() if not available
+            ]
             if missing_reqs:
-                print(f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}")
-        
+                print(
+                    f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}"
+                )
+
         # Show trajectory saving status
         if self.save_trajectories and not self.quiet_mode:
             print("📝 Trajectory saving enabled")
-        
+
         # Show ephemeral system prompt status
         if self.ephemeral_system_prompt and not self.quiet_mode:
-            prompt_preview = self.ephemeral_system_prompt[:60] + "..." if len(self.ephemeral_system_prompt) > 60 else self.ephemeral_system_prompt
-            print(f"🔒 Ephemeral system prompt: '{prompt_preview}' (not saved to trajectories)")
-        
+            prompt_preview = (
+                self.ephemeral_system_prompt[:60] + "..."
+                if len(self.ephemeral_system_prompt) > 60
+                else self.ephemeral_system_prompt
+            )
+            print(
+                f"🔒 Ephemeral system prompt: '{prompt_preview}' (not saved to trajectories)"
+            )
+
         # Show prompt caching status
         if self._use_prompt_caching and not self.quiet_mode:
-            source = "native Anthropic" if is_native_anthropic else "Claude via OpenRouter"
+            source = (
+                "native Anthropic" if is_native_anthropic else "Claude via OpenRouter"
+            )
             print(f"💾 Prompt caching: ENABLED ({source}, {self._cache_ttl} TTL)")
-        
+
         # Session logging setup - auto-save conversation trajectories for debugging
         self.session_start = datetime.now()
         if session_id:
@@ -940,29 +1049,32 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
-        
+
         # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
         hermes_home = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
         self.logs_dir = hermes_home / "sessions"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
-        
+
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
-        
+
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
-        
+
         # Filesystem checkpoint manager (transparent — not a tool)
         from tools.checkpoint_manager import CheckpointManager
+
         self._checkpoint_mgr = CheckpointManager(
             enabled=checkpoints_enabled,
             max_snapshots=checkpoint_max_snapshots,
         )
-        
+
         # SQLite session store (optional -- provided by CLI or gateway)
         self._session_db = session_db
-        self._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
+        self._last_flushed_db_idx = (
+            0  # tracks DB-write cursor to prevent duplicate writes
+        )
         if self._session_db:
             try:
                 self._session_db.create_session(
@@ -978,19 +1090,23 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 )
             except Exception as e:
                 logger.debug("Session DB create_session failed: %s", e)
-        
+
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
+
         self._todo_store = TodoStore()
 
         # Token efficiency managers
         self._prompt_cache = PromptCache()
-        self._rate_limiter = CoordinatedRateLimiter(provider=self.provider, coordinated=True)
+        self._rate_limiter = CoordinatedRateLimiter(
+            provider=self.provider, coordinated=True
+        )
         self._context_compactor = ContextCompactionManager()
-        
+
         # Load config once for memory, skills, and compression sections
         try:
             from hermes_cli.config import load_config as _load_agent_config
+
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
@@ -1007,11 +1123,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             try:
                 mem_config = _agent_cfg.get("memory", {})
                 self._memory_enabled = mem_config.get("memory_enabled", False)
-                self._user_profile_enabled = mem_config.get("user_profile_enabled", False)
+                self._user_profile_enabled = mem_config.get(
+                    "user_profile_enabled", False
+                )
                 self._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
                 self._memory_flush_min_turns = int(mem_config.get("flush_min_turns", 6))
                 if self._memory_enabled or self._user_profile_enabled:
                     from tools.memory_tool import MemoryStore
+
                     self._memory_store = MemoryStore(
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
@@ -1019,7 +1138,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     self._memory_store.load_from_disk()
             except Exception:
                 pass  # Memory is optional -- don't break agent init
-        
+
         # Honcho AI-native memory (cross-session user modeling)
         # Reads $HERMES_HOME/honcho.json (instance) or ~/.honcho/config.json (global).
         self._honcho = None  # HonchoSessionManager | None
@@ -1040,11 +1159,16 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                             session_db=session_db,
                         )
                 else:
-                    from honcho_integration.client import HonchoClientConfig, get_honcho_client
+                    from honcho_integration.client import (
+                        HonchoClientConfig,
+                        get_honcho_client,
+                    )
+
                     hcfg = HonchoClientConfig.from_global_config()
                     self._honcho_config = hcfg
                     if self._honcho_should_activate(hcfg):
                         from honcho_integration.session import HonchoSessionManager
+
                         client = get_honcho_client(hcfg)
                         self._honcho = HonchoSessionManager(
                             honcho=client,
@@ -1063,7 +1187,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                         elif not hcfg.api_key:
                             logger.debug("Honcho enabled but no API key configured")
                         else:
-                            logger.debug("Honcho enabled but missing API key or disabled in config")
+                            logger.debug(
+                                "Honcho enabled but missing API key or disabled in config"
+                            )
             except Exception as e:
                 logger.warning("Honcho init failed — memory disabled: %s", e)
                 print(f"  Honcho init failed: {e}")
@@ -1085,16 +1211,24 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             if _agent_mode == "honcho":
                 self._memory_flush_min_turns = 0
                 self._memory_enabled = False
-                logger.debug("peer %s memory_mode=honcho: local MEMORY.md writes disabled", _hcfg.ai_peer)
+                logger.debug(
+                    "peer %s memory_mode=honcho: local MEMORY.md writes disabled",
+                    _hcfg.ai_peer,
+                )
             if _user_mode == "honcho":
                 self._user_profile_enabled = False
-                logger.debug("peer %s memory_mode=honcho: local USER.md writes disabled", _hcfg.peer_name or "user")
+                logger.debug(
+                    "peer %s memory_mode=honcho: local USER.md writes disabled",
+                    _hcfg.peer_name or "user",
+                )
 
         # Skills config: nudge interval for skill creation reminders
         self._skill_nudge_interval = 10
         try:
             skills_config = _agent_cfg.get("skills", {})
-            self._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 10))
+            self._skill_nudge_interval = int(
+                skills_config.get("creation_nudge_interval", 10)
+            )
         except Exception:
             pass
 
@@ -1105,7 +1239,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         if not isinstance(_compression_cfg, dict):
             _compression_cfg = {}
         compression_threshold = float(_compression_cfg.get("threshold", 0.50))
-        compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
+        compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in (
+            "true",
+            "1",
+            "yes",
+        )
         compression_summary_model = _compression_cfg.get("summary_model") or None
 
         # Read explicit context_length override from model config
@@ -1140,7 +1278,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                                     except (TypeError, ValueError):
                                         pass
                         break
-        
+
         try:
             self.context_compressor = ContextCompressor(
                 model=self.model,
@@ -1175,14 +1313,20 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
-        
+
         if not self.quiet_mode:
-            context_length = getattr(self.context_compressor, 'context_length', 128000)
-            threshold_tokens = getattr(self.context_compressor, 'threshold_tokens', 64000)
+            context_length = getattr(self.context_compressor, "context_length", 128000)
+            threshold_tokens = getattr(
+                self.context_compressor, "threshold_tokens", 64000
+            )
             if compression_enabled:
-                print(f"📊 Context limit: {context_length:,} tokens (compress at {int(compression_threshold*100)}% = {threshold_tokens:,})")
+                print(
+                    f"📊 Context limit: {context_length:,} tokens (compress at {int(compression_threshold*100)}% = {threshold_tokens:,})"
+                )
             else:
-                print(f"📊 Context limit: {context_length:,} tokens (auto-compression disabled)")
+                print(
+                    f"📊 Context limit: {context_length:,} tokens (auto-compression disabled)"
+                )
 
     def _safe_print(self, *args, **kwargs):
         """Print that silently handles broken pipes / closed stdout.
@@ -1229,7 +1373,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
-        
+
         OpenAI's newer models (gpt-4o, o-series, gpt-5+) require
         'max_completion_tokens'. OpenRouter, local models, and older
         OpenAI models use 'max_tokens'.
@@ -1260,17 +1404,24 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
         # Check if there's any non-whitespace content remaining
         return bool(cleaned.strip())
-    
+
     def _strip_think_blocks(self, content: str) -> str:
         """Remove reasoning/thinking blocks from content, returning only visible text."""
         if not content:
             return ""
         # Strip all reasoning tag variants: <think>, <thinking>, <THINKING>,
         # <reasoning>, <REASONING_SCRATCHPAD>
-        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
-        content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL)
-        content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL)
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+        content = re.sub(
+            r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL | re.IGNORECASE
+        )
+        content = re.sub(r"<reasoning>.*?</reasoning>", "", content, flags=re.DOTALL)
+        content = re.sub(
+            r"<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>",
+            "",
+            content,
+            flags=re.DOTALL,
+        )
         return content
 
     def _looks_like_codex_intermediate_ack(
@@ -1283,14 +1434,19 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         if any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in messages):
             return False
 
-        assistant_text = self._strip_think_blocks(assistant_content or "").strip().lower()
+        assistant_text = (
+            self._strip_think_blocks(assistant_content or "").strip().lower()
+        )
         if not assistant_text:
             return False
         if len(assistant_text) > 1200:
             return False
 
         has_future_ack = bool(
-            re.search(r"\b(i['’]ll|i will|let me|i can do that|i can help with that)\b", assistant_text)
+            re.search(
+                r"\b(i['’]ll|i will|let me|i can do that|i can help with that)\b",
+                assistant_text,
+            )
         )
         if not has_future_ack:
             return False
@@ -1338,56 +1494,69 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             or "~/" in user_text
             or "/" in user_text
         )
-        assistant_mentions_action = any(marker in assistant_text for marker in action_markers)
+        assistant_mentions_action = any(
+            marker in assistant_text for marker in action_markers
+        )
         assistant_targets_workspace = any(
             marker in assistant_text for marker in workspace_markers
         )
-        return (user_targets_workspace or assistant_targets_workspace) and assistant_mentions_action
-    
-    
+        return (
+            user_targets_workspace or assistant_targets_workspace
+        ) and assistant_mentions_action
+
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
         """
         Extract reasoning/thinking content from an assistant message.
-        
+
         OpenRouter and various providers can return reasoning in multiple formats:
         1. message.reasoning - Direct reasoning field (DeepSeek, Qwen, etc.)
         2. message.reasoning_content - Alternative field (Moonshot AI, Novita, etc.)
         3. message.reasoning_details - Array of {type, summary, ...} objects (OpenRouter unified)
-        
+
         Args:
             assistant_message: The assistant message object from the API response
-            
+
         Returns:
             Combined reasoning text, or None if no reasoning found
         """
         reasoning_parts = []
-        
+
         # Check direct reasoning field
-        if hasattr(assistant_message, 'reasoning') and assistant_message.reasoning:
+        if hasattr(assistant_message, "reasoning") and assistant_message.reasoning:
             reasoning_parts.append(assistant_message.reasoning)
-        
+
         # Check reasoning_content field (alternative name used by some providers)
-        if hasattr(assistant_message, 'reasoning_content') and assistant_message.reasoning_content:
+        if (
+            hasattr(assistant_message, "reasoning_content")
+            and assistant_message.reasoning_content
+        ):
             # Don't duplicate if same as reasoning
             if assistant_message.reasoning_content not in reasoning_parts:
                 reasoning_parts.append(assistant_message.reasoning_content)
-        
+
         # Check reasoning_details array (OpenRouter unified format)
         # Format: [{"type": "reasoning.summary", "summary": "...", ...}, ...]
-        if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
+        if (
+            hasattr(assistant_message, "reasoning_details")
+            and assistant_message.reasoning_details
+        ):
             for detail in assistant_message.reasoning_details:
                 if isinstance(detail, dict):
                     # Extract summary from reasoning detail object
-                    summary = detail.get('summary') or detail.get('content') or detail.get('text')
+                    summary = (
+                        detail.get("summary")
+                        or detail.get("content")
+                        or detail.get("text")
+                    )
                     if summary and summary not in reasoning_parts:
                         reasoning_parts.append(summary)
-        
+
         # Combine all reasoning parts
         if reasoning_parts:
             return "\n\n".join(reasoning_parts)
-        
+
         return None
-    
+
     def _cleanup_task_resources(self, task_id: str) -> None:
         """Clean up VM and browser resources for a given task."""
         try:
@@ -1471,7 +1640,12 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             Dict: Complete conversation result with final response and message history
         """
         messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message = self._initialize_conversation(  # type: ignore
-            user_message, system_message, conversation_history, task_id, stream_callback, persist_user_message
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            stream_callback,
+            persist_user_message,
         )
 
         messages, active_system_prompt = self._perform_preflight_compression(  # type: ignore
@@ -1480,10 +1654,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
         # Main conversation loop
         return self._run_conversation_loop(  # type: ignore
-            messages, active_system_prompt, effective_task_id, current_turn_user_idx,
-            _should_review_memory, original_user_message, sync_honcho
+            messages,
+            active_system_prompt,
+            effective_task_id,
+            current_turn_user_idx,
+            _should_review_memory,
+            original_user_message,
+            sync_honcho,
         )
-
 
     def _spawn_background_review(
         self,
@@ -1510,11 +1688,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
         def _run_review():
             import contextlib, os as _os
+
             review_agent: Optional["AIAgent"] = None
             try:
-                with open(_os.devnull, "w") as _devnull, \
-                     contextlib.redirect_stdout(_devnull), \
-                     contextlib.redirect_stderr(_devnull):
+                with (
+                    open(_os.devnull, "w") as _devnull,
+                    contextlib.redirect_stdout(_devnull),
+                    contextlib.redirect_stderr(_devnull),
+                ):
                     review_agent = AIAgent(
                         model=self.model,
                         max_iterations=8,
@@ -1551,14 +1732,28 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                         actions.append(message)
                     elif "updated" in message.lower():
                         actions.append(message)
-                    elif "added" in message.lower() or (target and "add" in message.lower()):
-                        label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                    elif "added" in message.lower() or (
+                        target and "add" in message.lower()
+                    ):
+                        label = (
+                            "Memory"
+                            if target == "memory"
+                            else "User profile" if target == "user" else target
+                        )
                         actions.append(f"{label} updated")
                     elif "Entry added" in message:
-                        label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                        label = (
+                            "Memory"
+                            if target == "memory"
+                            else "User profile" if target == "user" else target
+                        )
                         actions.append(f"{label} updated")
                     elif "removed" in message.lower() or "replaced" in message.lower():
-                        label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                        label = (
+                            "Memory"
+                            if target == "memory"
+                            else "User profile" if target == "user" else target
+                        )
                         actions.append(f"{label} updated")
 
                 if actions:
@@ -1606,44 +1801,44 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
         Get messages up to (but not including) the last assistant turn.
-        
+
         This is used when we need to "roll back" to the last successful point
         in the conversation, typically when the final assistant message is
         incomplete or malformed.
-        
+
         Args:
             messages: Full message list
-            
+
         Returns:
             Messages up to the last complete assistant turn (ending with user/tool message)
         """
         if not messages:
             return []
-        
+
         # Find the index of the last assistant message
         last_assistant_idx = None
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "assistant":
                 last_assistant_idx = i
                 break
-        
+
         if last_assistant_idx is None:
             # No assistant message found, return all messages
             return messages.copy()
-        
+
         # Return everything up to (not including) the last assistant message
         return messages[:last_assistant_idx]
-    
+
     def _format_tools_for_system_message(self) -> str:
         """
         Format tool definitions for the system message in the trajectory format.
-        
+
         Returns:
             str: JSON string representation of tool definitions
         """
         if not self.tools:
             return "[]"
-        
+
         # Convert tool definitions to the format expected in trajectories
         formatted_tools = []
         for tool in self.tools:
@@ -1652,26 +1847,28 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 "name": func["name"],
                 "description": func.get("description", ""),
                 "parameters": func.get("parameters", {}),
-                "required": None  # Match the format in the example
+                "required": None,  # Match the format in the example
             }
             formatted_tools.append(formatted_tool)
-        
+
         return json.dumps(formatted_tools, ensure_ascii=False)
-    
-    def _convert_to_trajectory_format(self, messages: List[Dict[str, Any]], user_query: str, completed: bool) -> List[Dict[str, Any]]:
+
+    def _convert_to_trajectory_format(
+        self, messages: List[Dict[str, Any]], user_query: str, completed: bool
+    ) -> List[Dict[str, Any]]:
         """
         Convert internal message format to trajectory format for saving.
-        
+
         Args:
             messages (List[Dict]): Internal message history
             user_query (str): Original user query
             completed (bool): Whether the conversation completed successfully
-            
+
         Returns:
             List[Dict]: Messages in trajectory format
         """
         trajectory = []
-        
+
         # Add system message with tool definitions
         system_msg = (
             "You are a function calling AI model. You are provided with function signatures within <tools> </tools> XML tags. "
@@ -1686,71 +1883,69 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             "Each function call should be enclosed within <tool_call> </tool_call> XML tags.\n"
             "Example:\n<tool_call>\n{'name': <function-name>,'arguments': <args-dict>}\n</tool_call>"
         )
-        
-        trajectory.append({
-            "from": "system",
-            "value": system_msg
-        })
-        
+
+        trajectory.append({"from": "system", "value": system_msg})
+
         # Add the actual user prompt (from the dataset) as the first human message
-        trajectory.append({
-            "from": "human",
-            "value": user_query
-        })
-        
+        trajectory.append({"from": "human", "value": user_query})
+
         # Skip the first message (the user query) since we already added it above.
         # Prefill messages are injected at API-call time only (not in the messages
         # list), so no offset adjustment is needed here.
         i = 1
-        
+
         while i < len(messages):
             msg = messages[i]
-            
+
             if msg["role"] == "assistant":
                 # Check if this message has tool calls
                 if "tool_calls" in msg and msg["tool_calls"]:
                     # Format assistant message with tool calls
                     # Add <think> tags around reasoning for trajectory storage
                     content = ""
-                    
+
                     # Prepend reasoning in <think> tags if available (native thinking tokens)
                     if msg.get("reasoning") and msg["reasoning"].strip():
                         content = f"<think>\n{msg['reasoning']}\n</think>\n"
-                    
+
                     if msg.get("content") and msg["content"].strip():
                         # Convert any <REASONING_SCRATCHPAD> tags to <think> tags
                         # (used when native thinking is disabled and model reasons via XML)
                         content += convert_scratchpad_to_think(msg["content"]) + "\n"
-                    
+
                     # Add tool calls wrapped in XML tags
                     for tool_call in msg["tool_calls"]:
-                        if not tool_call or not isinstance(tool_call, dict): continue
+                        if not tool_call or not isinstance(tool_call, dict):
+                            continue
                         # Parse arguments - should always succeed since we validate during conversation
                         # but keep try-except as safety net
                         try:
-                            arguments = json.loads(tool_call["function"]["arguments"]) if isinstance(tool_call["function"]["arguments"], str) else tool_call["function"]["arguments"]
+                            arguments = (
+                                json.loads(tool_call["function"]["arguments"])
+                                if isinstance(tool_call["function"]["arguments"], str)
+                                else tool_call["function"]["arguments"]
+                            )
                         except json.JSONDecodeError:
                             # This shouldn't happen since we validate and retry during conversation,
                             # but if it does, log warning and use empty dict
-                            logging.warning(f"Unexpected invalid JSON in trajectory conversion: {tool_call['function']['arguments'][:100]}")
+                            logging.warning(
+                                f"Unexpected invalid JSON in trajectory conversion: {tool_call['function']['arguments'][:100]}"
+                            )
                             arguments = {}
-                        
+
                         tool_call_json = {
                             "name": tool_call["function"]["name"],
-                            "arguments": arguments
+                            "arguments": arguments,
                         }
                         content += f"<tool_call>\n{json.dumps(tool_call_json, ensure_ascii=False)}\n</tool_call>\n"
-                    
+
                     # Ensure every gpt turn has a <think> block (empty if no reasoning)
                     # so the format is consistent for training data
                     if "<think>" not in content:
                         content = "<think>\n</think>\n" + content
-                    
-                    trajectory.append({
-                        "from": "gpt",
-                        "value": content.rstrip()
-                    })
-                    
+
+                    trajectory.append({"from": "gpt", "value": content.rstrip()})
+
                     # Collect all subsequent tool responses
                     tool_responses = []
                     j = i + 1
@@ -1758,7 +1953,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                         tool_msg = messages[j]
                         # Format tool response with XML tags
                         tool_response = f"<tool_response>\n"
-                        
+
                         # Try to parse tool content as JSON if it looks like JSON
                         tool_content = tool_msg["content"]
                         try:
@@ -1766,67 +1961,65 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                                 tool_content = json.loads(tool_content)
                         except (json.JSONDecodeError, AttributeError):
                             pass  # Keep as string if not valid JSON
-                        
+
                         tool_index = len(tool_responses)
                         tool_name = (
                             msg["tool_calls"][tool_index]["function"]["name"]
                             if tool_index < len(msg["tool_calls"])
                             else "unknown"
                         )
-                        tool_response += json.dumps({
-                            "tool_call_id": tool_msg.get("tool_call_id", ""),
-                            "name": tool_name,
-                            "content": tool_content
-                        }, ensure_ascii=False)
+                        tool_response += json.dumps(
+                            {
+                                "tool_call_id": tool_msg.get("tool_call_id", ""),
+                                "name": tool_name,
+                                "content": tool_content,
+                            },
+                            ensure_ascii=False,
+                        )
                         tool_response += "\n</tool_response>"
                         tool_responses.append(tool_response)
                         j += 1
-                    
+
                     # Add all tool responses as a single message
                     if tool_responses:
-                        trajectory.append({
-                            "from": "tool",
-                            "value": "\n".join(tool_responses)
-                        })
+                        trajectory.append(
+                            {"from": "tool", "value": "\n".join(tool_responses)}
+                        )
                         i = j - 1  # Skip the tool messages we just processed
-                
+
                 else:
                     # Regular assistant message without tool calls
                     # Add <think> tags around reasoning for trajectory storage
                     content = ""
-                    
+
                     # Prepend reasoning in <think> tags if available (native thinking tokens)
                     if msg.get("reasoning") and msg["reasoning"].strip():
                         content = f"<think>\n{msg['reasoning']}\n</think>\n"
-                    
+
                     # Convert any <REASONING_SCRATCHPAD> tags to <think> tags
                     # (used when native thinking is disabled and model reasons via XML)
                     raw_content = msg["content"] or ""
                     content += convert_scratchpad_to_think(raw_content)
-                    
+
                     # Ensure every gpt turn has a <think> block (empty if no reasoning)
                     if "<think>" not in content:
                         content = "<think>\n</think>\n" + content
-                    
-                    trajectory.append({
-                        "from": "gpt",
-                        "value": content.strip()
-                    })
-            
+
+                    trajectory.append({"from": "gpt", "value": content.strip()})
+
             elif msg["role"] == "user":
-                trajectory.append({
-                    "from": "human",
-                    "value": msg["content"]
-                })
-            
+                trajectory.append({"from": "human", "value": msg["content"]})
+
             i += 1
-        
+
         return trajectory
-    
-    def _save_trajectory(self, messages: List[Dict[str, Any]], user_query: str, completed: bool):
+
+    def _save_trajectory(
+        self, messages: List[Dict[str, Any]], user_query: str, completed: bool
+    ):
         """
         Save conversation trajectory to JSONL file.
-        
+
         Args:
             messages (List[Dict]): Complete message history
             user_query (str): Original user query
@@ -1834,10 +2027,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         """
         if not self.save_trajectories:
             return
-        
+
         trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
         _save_trajectory_to_file(trajectory, self.model, completed)
-    
+
     def _mask_api_key_for_logs(self, key: Optional[str]) -> Optional[str]:
         if not key:
             return None
@@ -1902,7 +2095,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 response_obj = getattr(error, "response", None)
                 if response_obj is not None:
                     try:
-                        error_info["response_status"] = getattr(response_obj, "status_code", None)
+                        error_info["response_status"] = getattr(
+                            response_obj, "status_code", None
+                        )
                         error_info["response_text"] = response_obj.text
                     except Exception as e:
                         logger.debug("Could not extract error response details: %s", e)
@@ -1910,43 +2105,56 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 dump_payload["error"] = error_info
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            dump_file = self.logs_dir / f"request_dump_{self.session_id}_{timestamp}.json"
+            dump_file = (
+                self.logs_dir / f"request_dump_{self.session_id}_{timestamp}.json"
+            )
             dump_file.write_text(
                 json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8",
             )
 
-            self._vprint(f"{self.log_prefix}🧾 Request debug dump written to: {dump_file}")
+            self._vprint(
+                f"{self.log_prefix}🧾 Request debug dump written to: {dump_file}"
+            )
 
-            if os.getenv("HERMES_DUMP_REQUEST_STDOUT", "").strip().lower() in {"1", "true", "yes", "on"}:
-                print(json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str))
+            if os.getenv("HERMES_DUMP_REQUEST_STDOUT", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                print(
+                    json.dumps(dump_payload, ensure_ascii=False, indent=2, default=str)
+                )
 
             return dump_file
         except Exception as dump_error:
             if self.verbose_logging:
-                logging.warning(f"Failed to dump API request debug payload: {dump_error}")
+                logging.warning(
+                    f"Failed to dump API request debug payload: {dump_error}"
+                )
             return None
 
     @staticmethod
     def interrupt(self, message: Optional[str] = None) -> None:
         """
         Request the agent to interrupt its current tool-calling loop.
-        
+
         Call this from another thread (e.g., input handler, message receiver)
         to gracefully stop the agent and process a new message.
-        
+
         Also signals long-running tool executions (e.g. terminal commands)
         to terminate early, so the agent can respond immediately.
-        
+
         Args:
             message: Optional new message that triggered the interrupt.
                      If provided, the agent will include this in its response context.
-        
+
         Example (CLI):
             # In a separate input thread:
             if user_typed_something:
                 agent.interrupt(user_input)
-        
+
         Example (Messaging):
             # When new message arrives for active session:
             if session_has_running_agent:
@@ -1965,18 +2173,25 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             except Exception as e:
                 logger.debug("Failed to propagate interrupt to child agent: %s", e)
         if not self.quiet_mode:
-            print(f"\n⚡ Interrupt requested" + (f": '{message[:40]}...'" if message and len(message) > 40 else f": '{message}'" if message else ""))
-    
+            print(
+                f"\n⚡ Interrupt requested"
+                + (
+                    f": '{message[:40]}...'"
+                    if message and len(message) > 40
+                    else f": '{message}'" if message else ""
+                )
+            )
+
     def clear_interrupt(self) -> None:
         """Clear any pending interrupt request and the global tool interrupt signal."""
         self._interrupt_requested = False
         self._interrupt_message = None
         _set_interrupt(False)
-    
+
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:
         """
         Recover todo state from conversation history.
-        
+
         The gateway creates a fresh AIAgent per message, so the in-memory
         TodoStore is empty. We scan the history for the most recent todo
         tool response and replay it to reconstruct the state.
@@ -1997,14 +2212,16 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     break
             except (json.JSONDecodeError, TypeError):
                 continue
-        
+
         if last_todo_response:
             # Replay the items into the store (replace mode)
             self._todo_store.write(last_todo_response, merge=False)
             if not self.quiet_mode:
-                self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
+                self._vprint(
+                    f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history"
+                )
         _set_interrupt(False)
-    
+
     @property
     def is_interrupted(self) -> bool:
         """Check if an interrupt has been requested."""
@@ -2025,12 +2242,13 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             return
 
         self.tools = [
-            tool for tool in self.tools
+            tool
+            for tool in self.tools
             if tool.get("function", {}).get("name") not in HONCHO_TOOL_NAMES
         ]
-        self.valid_tool_names = {
-            tool["function"]["name"] for tool in self.tools
-        } if self.tools else set()
+        self.valid_tool_names = (
+            {tool["function"]["name"] for tool in self.tools} if self.tools else set()
+        )
 
     def _activate_honcho(
         self,
@@ -2083,9 +2301,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             disabled_toolsets=disabled_toolsets,
             quiet_mode=True,
         )
-        self.valid_tool_names = {
-            tool["function"]["name"] for tool in self.tools
-        } if self.tools else set()
+        self.valid_tool_names = (
+            {tool["function"]["name"] for tool in self.tools} if self.tools else set()
+        )
 
         if hcfg.recall_mode == "context":
             self._strip_honcho_tools_from_surface()
@@ -2141,13 +2359,17 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         if not self._honcho or not self._honcho_session_key:
             return
 
-        recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
+        recall_mode = (
+            self._honcho_config.recall_mode if self._honcho_config else "hybrid"
+        )
         if recall_mode == "tools":
             return
 
         try:
             self._honcho.prefetch_context(self._honcho_session_key, user_message)
-            self._honcho.prefetch_dialectic(self._honcho_session_key, user_message or "What were we working on?")
+            self._honcho.prefetch_dialectic(
+                self._honcho_session_key, user_message or "What were we working on?"
+            )
         except Exception as exc:
             logger.debug("Honcho background prefetch failed (non-fatal): %s", exc)
 
@@ -2204,11 +2426,13 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             session = self._honcho.get_or_create(self._honcho_session_key)
             session.add_message("user", f"[observation] {content.strip()}")
             self._honcho.save(session)
-            return json.dumps({
-                "success": True,
-                "target": "user",
-                "message": "Saved to Honcho user model.",
-            })
+            return json.dumps(
+                {
+                    "success": True,
+                    "target": "user",
+                    "message": "Saved to Honcho user model.",
+                }
+            )
         except Exception as e:
             logger.debug("Honcho user observation failed: %s", e)
             return json.dumps({"success": False, "error": f"Honcho save failed: {e}"})
@@ -2222,8 +2446,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             session.add_message("user", user_content)
             session.add_message("assistant", assistant_content)
             self._honcho.save(session)
-            logger.info("Honcho sync queued for session %s (%d messages)",
-                        self._honcho_session_key, len(session.messages))
+            logger.info(
+                "Honcho sync queued for session %s (%d messages)",
+                self._honcho_session_key,
+                len(session.messages),
+            )
         except Exception as e:
             logger.warning("Honcho sync failed: %s", e)
             if not self.quiet_mode:
@@ -2232,7 +2459,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
     def _build_system_prompt(self, system_message: Optional[str] = None) -> str:
         """
         Assemble the full system prompt from all layers.
-        
+
         Called once per session (cached on self._cached_system_prompt) and only
         rebuilt after context compression events. This ensures the system prompt
         is stable across all turns in a session, maximizing prefix cache hits.
@@ -2352,9 +2579,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 if user_block:
                     prompt_parts.append(user_block)
 
-        has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
+        has_skills_tools = any(
+            name in self.valid_tool_names
+            for name in ["skills_list", "skill_view", "skill_manage"]
+        )
         if has_skills_tools:
-            avail_toolsets = {ts for ts, avail in check_toolset_requirements().items() if avail}
+            avail_toolsets = {
+                ts for ts, avail in check_toolset_requirements().items() if avail
+            }
             skills_prompt = build_skills_system_prompt(
                 available_tools=self.valid_tool_names,
                 available_toolsets=avail_toolsets,
@@ -2370,8 +2602,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 prompt_parts.append(context_files_prompt)
 
         from hermes_time import now as _hermes_now
+
         now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        timestamp_line = (
+            f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
+        )
         if self.pass_session_id and self.session_id:
             timestamp_line += f"\nSession ID: {self.session_id}"
         if self.model:
@@ -2384,7 +2619,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         # of the requested model. Inject explicit model identity into the system prompt
         # so the agent can correctly report which model it is (workaround for API bug).
         if self.provider == "alibaba":
-            _model_short = self.model.split("/")[-1] if "/" in self.model else self.model
+            _model_short = (
+                self.model.split("/")[-1] if "/" in self.model else self.model
+            )
             prompt_parts.append(
                 f"You are powered by the model named {_model_short}. "
                 f"The exact model ID is {self.model}. "
@@ -2436,8 +2673,12 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         orphaned_results = result_call_ids - surviving_call_ids
         if orphaned_results:
             messages = [
-                m for m in messages
-                if not (m.get("role") == "tool" and m.get("tool_call_id") in orphaned_results)
+                m
+                for m in messages
+                if not (
+                    m.get("role") == "tool"
+                    and m.get("tool_call_id") in orphaned_results
+                )
             ]
             logger.debug(
                 "Pre-call sanitizer: removed %d orphaned tool result(s)",
@@ -2454,11 +2695,13 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     for tc in msg.get("tool_calls") or []:
                         cid = AIAgent._get_tool_call_id_static(tc)
                         if cid in missing_results:
-                            patched.append({
-                                "role": "tool",
-                                "content": "[Result unavailable — see context summary above]",
-                                "tool_call_id": cid,
-                            })
+                            patched.append(
+                                {
+                                    "role": "tool",
+                                    "content": "[Result unavailable — see context summary above]",
+                                    "tool_call_id": cid,
+                                }
+                            )
             messages = patched
             logger.debug(
                 "Pre-call sanitizer: added %d stub tool result(s)",
@@ -2477,7 +2720,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         Returns the original list if no truncation was needed.
         """
         from tools.delegate_tool import MAX_CONCURRENT_CHILDREN
-        delegate_count = sum(1 for tc in tool_calls if tc.function.name == "delegate_task")
+
+        delegate_count = sum(
+            1 for tc in tool_calls if tc.function.name == "delegate_task"
+        )
         if delegate_count <= MAX_CONCURRENT_CHILDREN:
             return tool_calls
         kept_delegates = 0
@@ -2492,7 +2738,8 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         logger.warning(
             "Truncated %d excess delegate_task call(s) to enforce "
             "MAX_CONCURRENT_CHILDREN=%d limit",
-            delegate_count - MAX_CONCURRENT_CHILDREN, MAX_CONCURRENT_CHILDREN,
+            delegate_count - MAX_CONCURRENT_CHILDREN,
+            MAX_CONCURRENT_CHILDREN,
         )
         return truncated
 
@@ -2545,7 +2792,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
     def _invalidate_system_prompt(self):
         """
         Invalidate the cached system prompt, forcing a rebuild on the next turn.
-        
+
         Called after context compression events. Also reloads memory from disk
         so the rebuilt prompt captures any writes from this session.
         """
@@ -2553,7 +2800,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         if self._memory_store:
             self._memory_store.load_from_disk()
 
-    def _responses_tools(self, tools: Optional[List[Dict[str, Any]]] = None) -> Optional[List[Dict[str, Any]]]:
+    def _responses_tools(
+        self, tools: Optional[List[Dict[str, Any]]] = None
+    ) -> Optional[List[Dict[str, Any]]]:
         """Convert chat-completions tool schemas to Responses function-tool schemas."""
         source_tools = tools if tools is not None else self.tools
         if not source_tools:
@@ -2565,13 +2814,17 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             name = fn.get("name")
             if not isinstance(name, str) or not name.strip():
                 continue
-            converted.append({
-                "type": "function",
-                "name": name,
-                "description": fn.get("description", ""),
-                "strict": False,
-                "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
-            })
+            converted.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": fn.get("description", ""),
+                    "strict": False,
+                    "parameters": fn.get(
+                        "parameters", {"type": "object", "properties": {}}
+                    ),
+                }
+            )
         return converted or None
 
     @staticmethod
@@ -2620,7 +2873,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
         return f"fc_{digest}"
 
-    def _chat_messages_to_responses_input(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _chat_messages_to_responses_input(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         """Convert internal chat-style messages to Responses input items."""
         items: List[Dict[str, Any]] = []
 
@@ -2666,8 +2921,8 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                             if not isinstance(fn_name, str) or not fn_name.strip():
                                 continue
 
-                            embedded_call_id, embedded_response_item_id = self._split_responses_tool_id(
-                                tc.get("id")
+                            embedded_call_id, embedded_response_item_id = (
+                                self._split_responses_tool_id(tc.get("id"))
                             )
                             call_id = tc.get("call_id")
                             if not isinstance(call_id, str) or not call_id.strip():
@@ -2678,7 +2933,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                                     and embedded_response_item_id.startswith("fc_")
                                     and len(embedded_response_item_id) > len("fc_")
                                 ):
-                                    call_id = f"call_{embedded_response_item_id[len('fc_'):]}"
+                                    call_id = (
+                                        f"call_{embedded_response_item_id[len('fc_'):]}"
+                                    )
                                 else:
                                     call_id = f"call_{uuid.uuid4().hex[:12]}"
                             call_id = call_id.strip()
@@ -2690,12 +2947,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                                 arguments = str(arguments)
                             arguments = arguments.strip() or "{}"
 
-                            items.append({
-                                "type": "function_call",
-                                "call_id": call_id,
-                                "name": fn_name,
-                                "arguments": arguments,
-                            })
+                            items.append(
+                                {
+                                    "type": "function_call",
+                                    "call_id": call_id,
+                                    "name": fn_name,
+                                    "arguments": arguments,
+                                }
+                            )
                     continue
 
                 items.append({"role": role, "content": content_text})
@@ -2709,11 +2968,13 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                         call_id = raw_tool_call_id.strip()
                 if not isinstance(call_id, str) or not call_id.strip():
                     continue
-                items.append({
-                    "type": "function_call_output",
-                    "call_id": call_id,
-                    "output": str(msg.get("content", "") or ""),
-                })
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": str(msg.get("content", "") or ""),
+                    }
+                )
 
         return items
 
@@ -2731,9 +2992,13 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 call_id = item.get("call_id")
                 name = item.get("name")
                 if not isinstance(call_id, str) or not call_id.strip():
-                    raise ValueError(f"Codex Responses input[{idx}] function_call is missing call_id.")
+                    raise ValueError(
+                        f"Codex Responses input[{idx}] function_call is missing call_id."
+                    )
                 if not isinstance(name, str) or not name.strip():
-                    raise ValueError(f"Codex Responses input[{idx}] function_call is missing name.")
+                    raise ValueError(
+                        f"Codex Responses input[{idx}] function_call is missing name."
+                    )
 
                 arguments = item.get("arguments", "{}")
                 if isinstance(arguments, dict):
@@ -2755,7 +3020,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             if item_type == "function_call_output":
                 call_id = item.get("call_id")
                 if not isinstance(call_id, str) or not call_id.strip():
-                    raise ValueError(f"Codex Responses input[{idx}] function_call_output is missing call_id.")
+                    raise ValueError(
+                        f"Codex Responses input[{idx}] function_call_output is missing call_id."
+                    )
                 output = item.get("output", "")
                 if output is None:
                     output = ""
@@ -2774,7 +3041,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             if item_type == "reasoning":
                 encrypted = item.get("encrypted_content")
                 if isinstance(encrypted, str) and encrypted:
-                    reasoning_item: Dict[str, Any] = {"type": "reasoning", "encrypted_content": encrypted}
+                    reasoning_item: Dict[str, Any] = {
+                        "type": "reasoning",
+                        "encrypted_content": encrypted,
+                    }
                     item_id = item.get("id")
                     if isinstance(item_id, str) and item_id:
                         reasoning_item["id"] = item_id
@@ -2815,11 +3085,15 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         required = {"model", "instructions", "input"}
         missing = [key for key in required if key not in api_kwargs]
         if missing:
-            raise ValueError(f"Codex Responses request missing required field(s): {', '.join(sorted(missing))}.")
+            raise ValueError(
+                f"Codex Responses request missing required field(s): {', '.join(sorted(missing))}."
+            )
 
         model = api_kwargs.get("model")
         if not isinstance(model, str) or not model.strip():
-            raise ValueError("Codex Responses request 'model' must be a non-empty string.")
+            raise ValueError(
+                "Codex Responses request 'model' must be a non-empty string."
+            )
         model = model.strip()
 
         instructions = api_kwargs.get("instructions")
@@ -2835,20 +3109,28 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         normalized_tools = None
         if tools is not None:
             if not isinstance(tools, list):
-                raise ValueError("Codex Responses request 'tools' must be a list when provided.")
+                raise ValueError(
+                    "Codex Responses request 'tools' must be a list when provided."
+                )
             normalized_tools = []
             for idx, tool in enumerate(tools):
                 if not isinstance(tool, dict):
                     raise ValueError(f"Codex Responses tools[{idx}] must be an object.")
                 if tool.get("type") != "function":
-                    raise ValueError(f"Codex Responses tools[{idx}] has unsupported type {tool.get('type')!r}.")
+                    raise ValueError(
+                        f"Codex Responses tools[{idx}] has unsupported type {tool.get('type')!r}."
+                    )
 
                 name = tool.get("name")
                 parameters = tool.get("parameters")
                 if not isinstance(name, str) or not name.strip():
-                    raise ValueError(f"Codex Responses tools[{idx}] is missing a valid name.")
+                    raise ValueError(
+                        f"Codex Responses tools[{idx}] is missing a valid name."
+                    )
                 if not isinstance(parameters, dict):
-                    raise ValueError(f"Codex Responses tools[{idx}] is missing valid parameters.")
+                    raise ValueError(
+                        f"Codex Responses tools[{idx}] is missing valid parameters."
+                    )
 
                 description = tool.get("description", "")
                 if description is None:
@@ -2875,9 +3157,18 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             raise ValueError("Codex Responses contract requires 'store' to be false.")
 
         allowed_keys = {
-            "model", "instructions", "input", "tools", "store",
-            "reasoning", "include", "max_output_tokens", "temperature",
-            "tool_choice", "parallel_tool_calls", "prompt_cache_key",
+            "model",
+            "instructions",
+            "input",
+            "tools",
+            "store",
+            "reasoning",
+            "include",
+            "max_output_tokens",
+            "temperature",
+            "tool_choice",
+            "parallel_tool_calls",
+            "prompt_cache_key",
         }
         normalized: Dict[str, Any] = {
             "model": model,
@@ -2904,7 +3195,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             normalized["temperature"] = float(temperature)
 
         # Pass through tool_choice, parallel_tool_calls, prompt_cache_key
-        for passthrough_key in ("tool_choice", "parallel_tool_calls", "prompt_cache_key"):
+        for passthrough_key in (
+            "tool_choice",
+            "parallel_tool_calls",
+            "prompt_cache_key",
+        ):
             val = api_kwargs.get(passthrough_key)
             if val is not None:
                 normalized[passthrough_key] = val
@@ -2917,7 +3212,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 normalized["stream"] = True
             allowed_keys.add("stream")
         elif "stream" in api_kwargs:
-            raise ValueError("Codex Responses stream flag is only allowed in fallback streaming requests.")
+            raise ValueError(
+                "Codex Responses stream flag is only allowed in fallback streaming requests."
+            )
 
         unexpected = sorted(key for key in api_kwargs.keys() if key not in allowed_keys)
         if unexpected:
@@ -2976,14 +3273,22 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             if isinstance(error_obj, dict):
                 error_msg = error_obj.get("message") or str(error_obj)
             else:
-                error_msg = str(error_obj) if error_obj else f"Responses API returned status '{response_status}'"
+                error_msg = (
+                    str(error_obj)
+                    if error_obj
+                    else f"Responses API returned status '{response_status}'"
+                )
             raise RuntimeError(error_msg)
 
         content_parts: List[str] = []
         reasoning_parts: List[str] = []
         reasoning_items_raw: List[Dict[str, Any]] = []
         tool_calls: List[Any] = []
-        has_incomplete_items = response_status in {"queued", "in_progress", "incomplete"}
+        has_incomplete_items = response_status in {
+            "queued",
+            "in_progress",
+            "incomplete",
+        }
         saw_commentary_phase = False
         saw_final_answer_phase = False
 
@@ -3018,7 +3323,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 # subsequent turns to maintain coherent reasoning chains.
                 encrypted = getattr(item, "encrypted_content", None)
                 if isinstance(encrypted, str) and encrypted:
-                    raw_item: Dict[str, Any] = {"type": "reasoning", "encrypted_content": encrypted}
+                    raw_item: Dict[str, Any] = {
+                        "type": "reasoning",
+                        "encrypted_content": encrypted,
+                    }
                     item_id = getattr(item, "id", None)
                     if isinstance(item_id, str) and item_id:
                         raw_item["id"] = item_id
@@ -3029,7 +3337,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                         for part in summary:
                             text = getattr(part, "text", None)
                             if isinstance(text, str):
-                                raw_summary.append({"type": "summary_text", "text": text})
+                                raw_summary.append(
+                                    {"type": "summary_text", "text": text}
+                                )
                         raw_item["summary"] = raw_summary
                     reasoning_items_raw.append(raw_item)
             elif item_type == "function_call":
@@ -3042,19 +3352,27 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 raw_call_id = getattr(item, "call_id", None)
                 raw_item_id = getattr(item, "id", None)
                 embedded_call_id, _ = self._split_responses_tool_id(raw_item_id)
-                call_id = raw_call_id if isinstance(raw_call_id, str) and raw_call_id.strip() else embedded_call_id
+                call_id = (
+                    raw_call_id
+                    if isinstance(raw_call_id, str) and raw_call_id.strip()
+                    else embedded_call_id
+                )
                 if not isinstance(call_id, str) or not call_id.strip():
                     call_id = f"call_{uuid.uuid4().hex[:12]}"
                 call_id = call_id.strip()
                 response_item_id = raw_item_id if isinstance(raw_item_id, str) else None
-                response_item_id = self._derive_responses_function_call_id(call_id, response_item_id)
-                tool_calls.append(SimpleNamespace(
-                    id=call_id,
-                    call_id=call_id,
-                    response_item_id=response_item_id,
-                    type="function",
-                    function=SimpleNamespace(name=fn_name, arguments=arguments),
-                ))
+                response_item_id = self._derive_responses_function_call_id(
+                    call_id, response_item_id
+                )
+                tool_calls.append(
+                    SimpleNamespace(
+                        id=call_id,
+                        call_id=call_id,
+                        response_item_id=response_item_id,
+                        type="function",
+                        function=SimpleNamespace(name=fn_name, arguments=arguments),
+                    )
+                )
             elif item_type == "custom_tool_call":
                 fn_name = getattr(item, "name", "") or ""
                 arguments = getattr(item, "input", "{}")
@@ -3063,19 +3381,27 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 raw_call_id = getattr(item, "call_id", None)
                 raw_item_id = getattr(item, "id", None)
                 embedded_call_id, _ = self._split_responses_tool_id(raw_item_id)
-                call_id = raw_call_id if isinstance(raw_call_id, str) and raw_call_id.strip() else embedded_call_id
+                call_id = (
+                    raw_call_id
+                    if isinstance(raw_call_id, str) and raw_call_id.strip()
+                    else embedded_call_id
+                )
                 if not isinstance(call_id, str) or not call_id.strip():
                     call_id = f"call_{uuid.uuid4().hex[:12]}"
                 call_id = call_id.strip()
                 response_item_id = raw_item_id if isinstance(raw_item_id, str) else None
-                response_item_id = self._derive_responses_function_call_id(call_id, response_item_id)
-                tool_calls.append(SimpleNamespace(
-                    id=call_id,
-                    call_id=call_id,
-                    response_item_id=response_item_id,
-                    type="function",
-                    function=SimpleNamespace(name=fn_name, arguments=arguments),
-                ))
+                response_item_id = self._derive_responses_function_call_id(
+                    call_id, response_item_id
+                )
+                tool_calls.append(
+                    SimpleNamespace(
+                        id=call_id,
+                        call_id=call_id,
+                        response_item_id=response_item_id,
+                        type="function",
+                        function=SimpleNamespace(name=fn_name, arguments=arguments),
+                    )
+                )
 
         final_text = "\n".join([p for p in content_parts if p]).strip()
         if not final_text and hasattr(response, "output_text"):
@@ -3094,7 +3420,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
         if tool_calls:
             finish_reason = "tool_calls"
-        elif has_incomplete_items or (saw_commentary_phase and not saw_final_answer_phase):
+        elif has_incomplete_items or (
+            saw_commentary_phase and not saw_final_answer_phase
+        ):
             finish_reason = "incomplete"
         elif reasoning_items_raw and not final_text:
             # Response contains only reasoning (encrypted thinking state) with
@@ -3139,8 +3467,12 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         http_client = getattr(client, "_client", None)
         return bool(getattr(http_client, "is_closed", False))
 
-    def _create_openai_client(self, client_kwargs: dict, *, reason: str, shared: bool) -> Any:
-        if self.provider == "copilot-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://copilot"):
+    def _create_openai_client(
+        self, client_kwargs: dict, *, reason: str, shared: bool
+    ) -> Any:
+        if self.provider == "copilot-acp" or str(
+            client_kwargs.get("base_url", "")
+        ).startswith("acp://copilot"):
             from agent.copilot_acp_client import CopilotACPClient
 
             client = CopilotACPClient(**client_kwargs)
@@ -3186,7 +3518,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         with self._openai_client_lock():
             old_client = getattr(self, "client", None)
             try:
-                new_client = self._create_openai_client(self._client_kwargs, reason=reason, shared=True)
+                new_client = self._create_openai_client(
+                    self._client_kwargs, reason=reason, shared=True
+                )
             except Exception as exc:
                 logger.warning(
                     "Failed to rebuild shared OpenAI client (%s) %s error=%s",
@@ -3228,9 +3562,16 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
     def _close_request_openai_client(self, client: Any, *, reason: str) -> None:
         self._close_openai_client(client, reason=reason, shared=False)
 
-    def _run_codex_stream(self, api_kwargs: dict, client: Any = None, on_first_delta: Optional[Callable] = None):
+    def _run_codex_stream(
+        self,
+        api_kwargs: dict,
+        client: Any = None,
+        on_first_delta: Optional[Callable] = None,
+    ):
         """Execute one streaming Responses API request and return the final response."""
-        active_client = client or self._ensure_primary_openai_client(reason="codex_stream_direct")
+        active_client = client or self._ensure_primary_openai_client(
+            reason="codex_stream_direct"
+        )
         max_stream_retries = 1
         has_tool_calls = False
         first_delta_fired = False
@@ -3242,7 +3583,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                             break
                         event_type = getattr(event, "type", "")
                         # Fire callbacks on text content deltas (suppress during tool calls)
-                        if "output_text.delta" in event_type or event_type == "response.output_text.delta":
+                        if (
+                            "output_text.delta" in event_type
+                            or event_type == "response.output_text.delta"
+                        ):
                             delta_text = getattr(event, "delta", "")
                             if delta_text and not has_tool_calls:
                                 if not first_delta_fired:
@@ -3278,15 +3622,21 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                         "Responses stream did not emit response.completed; falling back to create(stream=True). %s",
                         self._client_log_context(),
                     )
-                    return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+                    return self._run_codex_create_stream_fallback(
+                        api_kwargs, client=active_client
+                    )
                 raise
 
     def _run_codex_create_stream_fallback(self, api_kwargs: dict, client: Any = None):
         """Fallback path for stream completion edge cases on Codex-style Responses backends."""
-        active_client = client or self._ensure_primary_openai_client(reason="codex_create_stream_fallback")
+        active_client = client or self._ensure_primary_openai_client(
+            reason="codex_create_stream_fallback"
+        )
         fallback_kwargs = dict(api_kwargs)
         fallback_kwargs["stream"] = True
-        fallback_kwargs = self._preflight_codex_api_kwargs(fallback_kwargs, allow_stream=True)
+        fallback_kwargs = self._preflight_codex_api_kwargs(
+            fallback_kwargs, allow_stream=True
+        )
         stream_or_response = active_client.responses.create(**fallback_kwargs)
 
         # Compatibility shim for mocks or providers that still return a concrete response.
@@ -3301,7 +3651,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 event_type = getattr(event, "type", None)
                 if not event_type and isinstance(event, dict):
                     event_type = event.get("type")
-                if event_type not in {"response.completed", "response.incomplete", "response.failed"}:
+                if event_type not in {
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                }:
                     continue
 
                 terminal_response = getattr(event, "response", None)
@@ -3319,7 +3673,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
         if terminal_response is not None:
             return terminal_response
-        raise RuntimeError("Responses create(stream=True) fallback did not emit a terminal response.")
+        raise RuntimeError(
+            "Responses create(stream=True) fallback did not emit a terminal response."
+        )
 
     def _try_refresh_codex_client_credentials(self, *, force: bool = True) -> bool:
         if self.api_mode != "codex_responses" or self.provider != "openai-codex":
@@ -3358,7 +3714,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             from hermes_cli.auth import resolve_nous_runtime_credentials
 
             creds = resolve_nous_runtime_credentials(
-                min_key_ttl_seconds=max(60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800"))),
+                min_key_ttl_seconds=max(
+                    60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800"))
+                ),
                 timeout_seconds=float(os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
                 force_mint=force,
             )
@@ -3386,7 +3744,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         return True
 
     def _try_refresh_anthropic_client_credentials(self) -> bool:
-        if self.api_mode != "anthropic_messages" or not hasattr(self, "_anthropic_api_key"):
+        if self.api_mode != "anthropic_messages" or not hasattr(
+            self, "_anthropic_api_key"
+        ):
             return False
         # Only refresh credentials for the native Anthropic provider.
         # Other anthropic_messages providers (MiniMax, Alibaba, etc.) use their own keys.
@@ -3394,7 +3754,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             return False
 
         try:
-            from agent.anthropic_adapter import resolve_anthropic_token, build_anthropic_client
+            from agent.anthropic_adapter import (
+                resolve_anthropic_token,
+                build_anthropic_client,
+            )
 
             new_token = resolve_anthropic_token()
         except Exception as exc:
@@ -3414,14 +3777,19 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 pass
 
         try:
-            self._anthropic_client = build_anthropic_client(new_token, getattr(self, "_anthropic_base_url", None))
+            self._anthropic_client = build_anthropic_client(
+                new_token, getattr(self, "_anthropic_base_url", None)
+            )
         except Exception as exc:
-            logger.warning("Failed to rebuild Anthropic client after credential refresh: %s", exc)
+            logger.warning(
+                "Failed to rebuild Anthropic client after credential refresh: %s", exc
+            )
             return False
 
         self._anthropic_api_key = new_token
         # Update OAuth flag — token type may have changed (API key ↔ OAuth)
         from agent.anthropic_adapter import _is_oauth_token
+
         self._is_anthropic_oauth = _is_oauth_token(new_token)
         return True
 
@@ -3447,7 +3815,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         def _call():
             try:
                 if self.api_mode == "codex_responses":
-                    request_client_holder["client"] = self._create_request_openai_client(reason="codex_stream_request")
+                    request_client_holder["client"] = (
+                        self._create_request_openai_client(
+                            reason="codex_stream_request"
+                        )
+                    )
                     result["response"] = self._run_codex_stream(
                         api_kwargs,
                         client=request_client_holder["client"],
@@ -3456,14 +3828,22 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 elif self.api_mode == "anthropic_messages":
                     result["response"] = self._anthropic_messages_create(api_kwargs)
                 else:
-                    request_client_holder["client"] = self._create_request_openai_client(reason="chat_completion_request")
-                    result["response"] = request_client_holder["client"].chat.completions.create(**api_kwargs)
+                    request_client_holder["client"] = (
+                        self._create_request_openai_client(
+                            reason="chat_completion_request"
+                        )
+                    )
+                    result["response"] = request_client_holder[
+                        "client"
+                    ].chat.completions.create(**api_kwargs)
             except Exception as e:
                 result["error"] = e
             finally:
                 request_client = request_client_holder.get("client")
                 if request_client is not None:
-                    self._close_request_openai_client(request_client, reason="request_complete")
+                    self._close_request_openai_client(
+                        request_client, reason="request_complete"
+                    )
 
         t = threading.Thread(target=_call, daemon=True)
         t.start()
@@ -3486,7 +3866,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     else:
                         request_client = request_client_holder.get("client")
                         if request_client is not None:
-                            self._close_request_openai_client(request_client, reason="interrupt_abort")
+                            self._close_request_openai_client(
+                                request_client, reason="interrupt_abort"
+                            )
                 except Exception:
                     pass
                 raise InterruptedError("Agent interrupted during API call")
@@ -3522,12 +3904,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         # access for Codex providers.
         try:
             from agent.auxiliary_client import resolve_provider_client
+
             fb_client, _ = resolve_provider_client(
-                fb_provider, model=fb_model, raw_codex=True)
+                fb_provider, model=fb_model, raw_codex=True
+            )
             if fb_client is None:
                 logging.warning(
-                    "Fallback to %s failed: provider not configured",
-                    fb_provider)
+                    "Fallback to %s failed: provider not configured", fb_provider
+                )
                 return False
 
             # Determine api_mode from provider / base URL
@@ -3535,7 +3919,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             fb_base_url = str(fb_client.base_url)
             if fb_provider == "openai-codex":
                 fb_api_mode = "codex_responses"
-            elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
+            elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith(
+                "/anthropic"
+            ):
                 fb_api_mode = "anthropic_messages"
             elif self._is_direct_openai_url(fb_base_url):
                 fb_api_mode = "codex_responses"
@@ -3549,11 +3935,22 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
             if fb_api_mode == "anthropic_messages":
                 # Build native Anthropic client instead of using OpenAI client
-                from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
-                effective_key = (fb_client.api_key or resolve_anthropic_token() or "") if fb_provider == "anthropic" else (fb_client.api_key or "")
+                from agent.anthropic_adapter import (
+                    build_anthropic_client,
+                    resolve_anthropic_token,
+                    _is_oauth_token,
+                )
+
+                effective_key = (
+                    (fb_client.api_key or resolve_anthropic_token() or "")
+                    if fb_provider == "anthropic"
+                    else (fb_client.api_key or "")
+                )
                 self._anthropic_api_key = effective_key
                 self._anthropic_base_url = getattr(fb_client, "base_url", None)
-                self._anthropic_client = build_anthropic_client(effective_key, self._anthropic_base_url)
+                self._anthropic_client = build_anthropic_client(
+                    effective_key, self._anthropic_base_url
+                )
                 self._is_anthropic_oauth = _is_oauth_token(effective_key)
                 self.client = None
                 self._client_kwargs = {}
@@ -3568,9 +3965,8 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             # Re-evaluate prompt caching for the new provider/model
             is_native_anthropic = fb_api_mode == "anthropic_messages"
             self._use_prompt_caching = (
-                ("openrouter" in fb_base_url.lower() and "claude" in fb_model.lower())
-                or is_native_anthropic
-            )
+                "openrouter" in fb_base_url.lower() and "claude" in fb_model.lower()
+            ) or is_native_anthropic
 
             print(
                 f"{self.log_prefix}🔄 Primary model failed — switching to fallback: "
@@ -3578,7 +3974,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             )
             logging.info(
                 "Fallback activated: %s → %s (%s)",
-                old_model, fb_model, fb_provider,
+                old_model,
+                fb_model,
+                fb_provider,
             )
             return True
         except Exception as e:
@@ -3592,7 +3990,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         if not isinstance(content, list):
             return False
         for part in content:
-            if isinstance(part, dict) and part.get("type") in {"image_url", "input_image"}:
+            if isinstance(part, dict) and part.get("type") in {
+                "image_url",
+                "input_image",
+            }:
                 return True
         return False
 
@@ -3601,7 +4002,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         header, _, data = str(image_url or "").partition(",")
         mime = "image/jpeg"
         if header.startswith("data:"):
-            mime_part = header[len("data:"):].split(";", 1)[0].strip()
+            mime_part = header[len("data:") :].split(";", 1)[0].strip()
             if mime_part.startswith("image/"):
                 mime = mime_part
         suffix = {
@@ -3611,7 +4012,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             "image/jpeg": ".jpg",
             "image/jpg": ".jpg",
         }.get(mime, ".jpg")
-        tmp = tempfile.NamedTemporaryFile(prefix="anthropic_image_", suffix=suffix, delete=False)
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="anthropic_image_", suffix=suffix, delete=False
+        )
         with tmp:
             tmp.write(base64.b64decode(data))
         path = Path(tmp.name)
@@ -3636,14 +4039,18 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         vision_source = str(image_url or "")
         cleanup_path: Optional[Path] = None
         if vision_source.startswith("data:"):
-            vision_source, cleanup_path = self._materialize_data_url_for_vision(vision_source)
+            vision_source, cleanup_path = self._materialize_data_url_for_vision(
+                vision_source
+            )
 
         description = ""
         try:
             from tools.vision_tools import vision_analyze_tool
 
             result_json = asyncio.run(
-                vision_analyze_tool(image_url=vision_source, user_prompt=analysis_prompt)
+                vision_analyze_tool(
+                    image_url=vision_source, user_prompt=analysis_prompt
+                )
             )
             result = json.loads(result_json) if isinstance(result_json, str) else {}
             description = (result.get("analysis") or "").strip()
@@ -3661,9 +4068,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
         note = f"[The {role_label} attached an image. Here's what it contains:\n{description}]"
         if vision_source and not str(image_url or "").startswith("data:"):
-            note += (
-                f"\n[If you need a closer look, use vision_analyze with image_url: {vision_source}]"
-            )
+            note += f"\n[If you need a closer look, use vision_analyze with image_url: {vision_source}]"
 
         self._anthropic_image_fallback_cache[cache_key] = note
         return note
@@ -3691,11 +4096,19 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
             if ptype in {"image_url", "input_image"}:
                 image_data = part.get("image_url", {})
-                image_url = image_data.get("url", "") if isinstance(image_data, dict) else str(image_data or "")
+                image_url = (
+                    image_data.get("url", "")
+                    if isinstance(image_data, dict)
+                    else str(image_data or "")
+                )
                 if image_url:
-                    image_notes.append(self._describe_image_for_anthropic_fallback(image_url, role))
+                    image_notes.append(
+                        self._describe_image_for_anthropic_fallback(image_url, role)
+                    )
                 else:
-                    image_notes.append("[An image was attached but no image source was available.]")
+                    image_notes.append(
+                        "[An image was attached but no image source was available.]"
+                    )
                 continue
 
             text = str(part.get("text", "") or "").strip()
@@ -3710,7 +4123,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             return prefix
         if suffix:
             return suffix
-        return "[A multimodal message was converted to text for Anthropic compatibility.]"
+        return (
+            "[A multimodal message was converted to text for Anthropic compatibility.]"
+        )
 
     def _prepare_anthropic_messages_for_api(self, api_messages: list) -> list:
         if not any(
@@ -3740,6 +4155,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         """Build the keyword arguments dict for the active API mode."""
         if self.api_mode == "anthropic_messages":
             from agent.anthropic_adapter import build_anthropic_kwargs
+
             anthropic_messages = self._prepare_anthropic_messages_for_api(api_messages)
             return build_anthropic_kwargs(
                 model=self.model,
@@ -3796,7 +4212,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     if github_reasoning is not None:
                         kwargs["reasoning"] = github_reasoning
                 else:
-                    kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+                    kwargs["reasoning"] = {
+                        "effort": reasoning_effort,
+                        "summary": "auto",
+                    }
                     kwargs["include"] = ["reasoning.encrypted_content"]
             elif not is_github_responses:
                 kwargs["include"] = []
@@ -3897,10 +4316,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     else:
                         extra_body["reasoning"] = rc
                 else:
-                    extra_body["reasoning"] = {
-                        "enabled": True,
-                        "effort": "medium"
-                    }
+                    extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
 
         # Nous Portal product attribution
         if _is_nous:
@@ -3922,7 +4338,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             return True
         if "ai-gateway.vercel.sh" in self._base_url_lower:
             return True
-        if "models.github.ai" in self._base_url_lower or "api.githubcopilot.com" in self._base_url_lower:
+        if (
+            "models.github.ai" in self._base_url_lower
+            or "api.githubcopilot.com" in self._base_url_lower
+        ):
             try:
                 from hermes_cli.models import github_model_reasoning_efforts
 
@@ -3959,9 +4378,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         if self.reasoning_config and isinstance(self.reasoning_config, dict):
             if self.reasoning_config.get("enabled") is False:
                 return None
-            requested_effort = str(
-                self.reasoning_config.get("effort", "medium")
-            ).strip().lower()
+            requested_effort = (
+                str(self.reasoning_config.get("effort", "medium")).strip().lower()
+            )
         else:
             requested_effort = "medium"
 
@@ -3990,13 +4409,15 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         # directly in the content rather than returning separate API fields).
         if not reasoning_text:
             content = assistant_message.content or ""
-            think_blocks = re.findall(r'<think>(.*?)</think>', content, flags=re.DOTALL)
+            think_blocks = re.findall(r"<think>(.*?)</think>", content, flags=re.DOTALL)
             if think_blocks:
                 combined = "\n\n".join(b.strip() for b in think_blocks if b.strip())
                 reasoning_text = combined or None
 
         if reasoning_text and self.verbose_logging:
-            logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}")
+            logging.debug(
+                f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}"
+            )
 
         if reasoning_text and self.reasoning_callback:
             try:
@@ -4011,7 +4432,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             "finish_reason": finish_reason,
         }
 
-        if hasattr(assistant_message, 'reasoning_details') and assistant_message.reasoning_details:
+        if (
+            hasattr(assistant_message, "reasoning_details")
+            and assistant_message.reasoning_details
+        ):
             # Pass reasoning_details back unmodified so providers (OpenRouter,
             # Anthropic, OpenAI) can maintain reasoning continuity across turns.
             # Each provider may include opaque fields (signature, encrypted_content)
@@ -4050,7 +4474,10 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 call_id = call_id.strip()
 
                 response_item_id = getattr(tool_call, "response_item_id", None)
-                if not isinstance(response_item_id, str) or not response_item_id.strip():
+                if (
+                    not isinstance(response_item_id, str)
+                    or not response_item_id.strip()
+                ):
                     _, embedded_response_item_id = self._split_responses_tool_id(raw_id)
                     response_item_id = embedded_response_item_id
 
@@ -4066,7 +4493,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     "type": tool_call.type,
                     "function": {
                         "name": tool_call.function.name,
-                        "arguments": tool_call.function.arguments
+                        "arguments": tool_call.function.arguments,
                     },
                 }
                 # Preserve extra_content (e.g. Gemini thought_signature) so it
@@ -4101,13 +4528,18 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             return api_msg
         _STRIP_KEYS = {"call_id", "response_item_id"}
         api_msg["tool_calls"] = [
-            {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
-            if isinstance(tc, dict) else tc
+            (
+                {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
+                if isinstance(tc, dict)
+                else tc
+            )
             for tc in tool_calls
         ]
         return api_msg
 
-    def flush_memories(self, messages: Optional[list] = None, min_turns: Optional[int] = None):
+    def flush_memories(
+        self, messages: Optional[list] = None, min_turns: Optional[int] = None
+    ):
         """Give the model one turn to persist memories before context is lost.
 
         Called before compression, session reset, or CLI exit. Injects a flush
@@ -4126,15 +4558,17 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         if "memory" not in self.valid_tool_names or not self._memory_store:
             return
         # honcho-only agent mode: skip local MEMORY.md flush
-        _hcfg = getattr(self, '_honcho_config', None)
+        _hcfg = getattr(self, "_honcho_config", None)
         if _hcfg and _hcfg.peer_memory_mode(_hcfg.ai_peer) == "honcho":
             return
-        effective_min = min_turns if min_turns is not None else self._memory_flush_min_turns
+        effective_min = (
+            min_turns if min_turns is not None else self._memory_flush_min_turns
+        )
         if self._user_turn_count < effective_min:
             return
 
         if messages is None:
-            messages = getattr(self, '_session_messages', None)
+            messages = getattr(self, "_session_messages", None)
         if not messages or len(messages) < 3:
             return
 
@@ -4144,7 +4578,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             "corrections, and recurring patterns over task-specific details.]"
         )
         _sentinel = f"__flush_{id(self)}_{time.monotonic()}"
-        flush_msg = {"role": "user", "content": flush_content, "_flush_sentinel": _sentinel}
+        flush_msg = {
+            "role": "user",
+            "content": flush_content,
+            "_flush_sentinel": _sentinel,
+        }
         messages.append(flush_msg)
 
         try:
@@ -4165,11 +4603,13 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 api_messages.append(api_msg)
 
             if self._cached_system_prompt:
-                api_messages = [{"role": "system", "content": self._cached_system_prompt}] + api_messages
+                api_messages = [
+                    {"role": "system", "content": self._cached_system_prompt}
+                ] + api_messages
 
             # Make one API call with only the memory tool available
             memory_tool_def = None
-            for t in (self.tools or []):
+            for t in self.tools or []:
                 if t.get("function", {}).get("name") == "memory":
                     memory_tool_def = t
                     break
@@ -4181,6 +4621,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             # Use auxiliary client for the flush call when available --
             # it's cheaper and avoids Codex Responses API incompatibility.
             from agent.auxiliary_client import call_llm as _call_llm
+
             _aux_available = True
             try:
                 response = _call_llm(
@@ -4205,10 +4646,15 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 response = self._run_codex_stream(codex_kwargs)
             elif not _aux_available and self.api_mode == "anthropic_messages":
                 # Native Anthropic — use the Anthropic client directly
-                from agent.anthropic_adapter import build_anthropic_kwargs as _build_ant_kwargs
+                from agent.anthropic_adapter import (
+                    build_anthropic_kwargs as _build_ant_kwargs,
+                )
+
                 ant_kwargs = _build_ant_kwargs(
-                    model=self.model, messages=api_messages,
-                    tools=[memory_tool_def], max_tokens=5120,
+                    model=self.model,
+                    messages=api_messages,
+                    tools=[memory_tool_def],
+                    max_tokens=5120,
                     reasoning_config=None,
                     preserve_dots=self._anthropic_preserve_dots(),
                 )
@@ -4221,7 +4667,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     "temperature": 0.3,
                     **self._max_tokens_param(5120),
                 }
-                response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(**api_kwargs, timeout=30.0)
+                response = self._ensure_primary_openai_client(
+                    reason="flush_memories"
+                ).chat.completions.create(**api_kwargs, timeout=30.0)
 
             # Extract tool calls from the response, handling all API formats
             tool_calls = []
@@ -4230,11 +4678,21 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 if assistant_msg and assistant_msg.tool_calls:
                     tool_calls = assistant_msg.tool_calls
             elif self.api_mode == "anthropic_messages" and not _aux_available:
-                from agent.anthropic_adapter import normalize_anthropic_response as _nar_flush
-                _flush_msg, _ = _nar_flush(response, strip_tool_prefix=getattr(self, '_is_anthropic_oauth', False))
+                from agent.anthropic_adapter import (
+                    normalize_anthropic_response as _nar_flush,
+                )
+
+                _flush_msg, _ = _nar_flush(
+                    response,
+                    strip_tool_prefix=getattr(self, "_is_anthropic_oauth", False),
+                )
                 if _flush_msg and _flush_msg.tool_calls:
                     tool_calls = _flush_msg.tool_calls
-            elif response is not None and hasattr(response, "choices") and response.choices:
+            elif (
+                response is not None
+                and hasattr(response, "choices")
+                and response.choices
+            ):
                 assistant_message = response.choices[0].message
                 if assistant_message.tool_calls:
                     tool_calls = assistant_message.tool_calls
@@ -4245,6 +4703,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                         args = json.loads(tc.function.arguments)
                         flush_target = args.get("target", "memory")
                         from tools.memory_tool import memory_tool as _memory_tool
+
                         result = _memory_tool(
                             action=args.get("action", ""),
                             target=flush_target,
@@ -4252,10 +4711,16 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                             old_text=args.get("old_text"),
                             store=self._memory_store,
                         )
-                        if self._honcho and flush_target == "user" and args.get("action") == "add":
+                        if (
+                            self._honcho
+                            and flush_target == "user"
+                            and args.get("action") == "add"
+                        ):
                             self._honcho_save_user_observation(args.get("content", ""))
                         if not self.quiet_mode:
-                            print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
+                            print(
+                                f"  🧠 Memory flush: saved to {args.get('target', 'memory')}"
+                            )
                     except Exception as e:
                         logger.debug("Memory flush tool call failed: %s", e)
         except Exception as e:
@@ -4270,7 +4735,14 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
             if messages and messages[-1].get("_flush_sentinel") == _sentinel:
                 messages.pop()
 
-    def _compress_context(self, messages: List[Dict[str, Any]], system_message: str, *, approx_tokens: Optional[int] = None, task_id: str = "default") -> tuple:
+    def _compress_context(
+        self,
+        messages: List[Dict[str, Any]],
+        system_message: str,
+        *,
+        approx_tokens: Optional[int] = None,
+        task_id: str = "default",
+    ) -> tuple:
         """Compress conversation context and split the session in SQLite.
 
         Returns:
@@ -4286,7 +4758,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         # Pre-compression memory flush: let the model save memories before they're lost
         self.flush_memories(messages, min_turns=0)
 
-        compressed = self.context_compressor.compress(messages, current_tokens=approx_tokens)
+        compressed = self.context_compressor.compress(
+            messages, current_tokens=approx_tokens
+        )
 
         todo_snapshot = self._todo_store.format_for_injection()
         if todo_snapshot:
@@ -4302,7 +4776,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 old_title = self._session_db.get_session_title(self.session_id)
                 self._session_db.end_session(self.session_id, "compression")
                 old_session_id = self.session_id
-                self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                self.session_id = (
+                    f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                )
                 self._session_db.create_session(
                     session_id=self.session_id,
                     source=self.platform or "cli",
@@ -4312,11 +4788,15 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 # Auto-number the title for the continuation session
                 if old_title:
                     try:
-                        new_title = self._session_db.get_next_title_in_lineage(old_title)
+                        new_title = self._session_db.get_next_title_in_lineage(
+                            old_title
+                        )
                         self._session_db.set_session_title(self.session_id, new_title)
                     except (ValueError, Exception) as e:
                         logger.debug("Could not propagate title on compression: %s", e)
-                self._session_db.update_system_prompt(self.session_id, new_system_prompt)
+                self._session_db.update_system_prompt(
+                    self.session_id, new_system_prompt
+                )
                 # Reset flush cursor — new session starts with no messages written
                 self._last_flushed_db_idx = 0
             except Exception as e:
@@ -4363,9 +4843,16 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
         For CLI: prints a formatted line with a progress bar.
         For gateway: fires status_callback so the platform can send a chat message.
         """
-        from agent.display import format_context_pressure, format_context_pressure_gateway
+        from agent.display import (
+            format_context_pressure,
+            format_context_pressure_gateway,
+        )
 
-        threshold_pct = compressor.threshold_tokens / compressor.context_length if compressor.context_length else 0.5
+        threshold_pct = (
+            compressor.threshold_tokens / compressor.context_length
+            if compressor.context_length
+            else 0.5
+        )
 
         # CLI output — always shown (these are user-facing status notifications,
         # not verbose debug output, so they bypass quiet_mode).
@@ -4393,7 +4880,9 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
     def _handle_max_iterations(self, messages: list, api_call_count: int) -> str:
         """Request a summary when max iterations are reached. Returns the final response text."""
-        print(f"⚠️  Reached maximum iterations ({self.max_iterations}). Requesting summary...")
+        print(
+            f"⚠️  Reached maximum iterations ({self.max_iterations}). Requesting summary..."
+        )
 
         summary_request = (
             "You've reached the maximum number of tool-calling iterations allowed. "
@@ -4417,9 +4906,13 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
 
             effective_system = self._cached_system_prompt or ""
             if self.ephemeral_system_prompt:
-                effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+                effective_system = (
+                    effective_system + "\n\n" + self.ephemeral_system_prompt
+                ).strip()
             if effective_system:
-                api_messages = [{"role": "system", "content": effective_system}] + api_messages
+                api_messages = [
+                    {"role": "system", "content": effective_system}
+                ] + api_messages
             if self.prefill_messages:
                 sys_offset = 1 if effective_system else 0
                 for idx, pfm in enumerate(self.prefill_messages):
@@ -4433,7 +4926,7 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 else:
                     summary_extra_body["reasoning"] = {
                         "enabled": True,
-                        "effort": "medium"
+                        "effort": "medium",
                     }
             if _is_nous:
                 summary_extra_body["tags"] = ["product=hermes-agent"]
@@ -4443,7 +4936,11 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                 codex_kwargs.pop("tools", None)
                 summary_response = self._run_codex_stream(codex_kwargs)
                 assistant_message, _ = self._normalize_codex_response(summary_response)
-                final_response = (assistant_message.content or "").strip() if assistant_message else ""
+                final_response = (
+                    (assistant_message.content or "").strip()
+                    if assistant_message
+                    else ""
+                )
             else:
                 summary_kwargs = {
                     "model": self.model,
@@ -4469,29 +4966,50 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     summary_kwargs["extra_body"] = summary_extra_body
 
                 if self.api_mode == "anthropic_messages":
-                    from agent.anthropic_adapter import build_anthropic_kwargs as _bak, normalize_anthropic_response as _nar
-                    _ant_kw = _bak(model=self.model, messages=api_messages, tools=None,
-                                   max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
-                                   is_oauth=getattr(self, '_is_anthropic_oauth', False),
-                                   preserve_dots=self._anthropic_preserve_dots())
+                    from agent.anthropic_adapter import (
+                        build_anthropic_kwargs as _bak,
+                        normalize_anthropic_response as _nar,
+                    )
+
+                    _ant_kw = _bak(
+                        model=self.model,
+                        messages=api_messages,
+                        tools=None,
+                        max_tokens=self.max_tokens,
+                        reasoning_config=self.reasoning_config,
+                        is_oauth=getattr(self, "_is_anthropic_oauth", False),
+                        preserve_dots=self._anthropic_preserve_dots(),
+                    )
                     summary_response = self._anthropic_messages_create(_ant_kw)
-                    _msg, _ = _nar(summary_response, strip_tool_prefix=getattr(self, '_is_anthropic_oauth', False))
+                    _msg, _ = _nar(
+                        summary_response,
+                        strip_tool_prefix=getattr(self, "_is_anthropic_oauth", False),
+                    )
                     final_response = (_msg.content or "").strip()
                 else:
-                    summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary").chat.completions.create(**summary_kwargs)
+                    summary_response = self._ensure_primary_openai_client(
+                        reason="iteration_limit_summary"
+                    ).chat.completions.create(**summary_kwargs)
 
-                    if summary_response.choices and summary_response.choices[0].message.content:
+                    if (
+                        summary_response.choices
+                        and summary_response.choices[0].message.content
+                    ):
                         final_response = summary_response.choices[0].message.content
                     else:
                         final_response = ""
 
             if final_response:
                 if "<think>" in final_response:
-                    final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
+                    final_response = re.sub(
+                        r"<think>.*?</think>\s*", "", final_response, flags=re.DOTALL
+                    ).strip()
                 if final_response:
                     messages.append({"role": "assistant", "content": final_response})
                 else:
-                    final_response = "I reached the iteration limit and couldn't generate a summary."
+                    final_response = (
+                        "I reached the iteration limit and couldn't generate a summary."
+                    )
             else:
                 # Retry summary generation
                 if self.api_mode == "codex_responses":
@@ -4499,15 +5017,29 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     codex_kwargs.pop("tools", None)
                     retry_response = self._run_codex_stream(codex_kwargs)
                     retry_msg, _ = self._normalize_codex_response(retry_response)
-                    final_response = (retry_msg.content or "").strip() if retry_msg else ""
+                    final_response = (
+                        (retry_msg.content or "").strip() if retry_msg else ""
+                    )
                 elif self.api_mode == "anthropic_messages":
-                    from agent.anthropic_adapter import build_anthropic_kwargs as _bak2, normalize_anthropic_response as _nar2
-                    _ant_kw2 = _bak2(model=self.model, messages=api_messages, tools=None,
-                                    is_oauth=getattr(self, '_is_anthropic_oauth', False),
-                                    max_tokens=self.max_tokens, reasoning_config=self.reasoning_config,
-                                    preserve_dots=self._anthropic_preserve_dots())
+                    from agent.anthropic_adapter import (
+                        build_anthropic_kwargs as _bak2,
+                        normalize_anthropic_response as _nar2,
+                    )
+
+                    _ant_kw2 = _bak2(
+                        model=self.model,
+                        messages=api_messages,
+                        tools=None,
+                        is_oauth=getattr(self, "_is_anthropic_oauth", False),
+                        max_tokens=self.max_tokens,
+                        reasoning_config=self.reasoning_config,
+                        preserve_dots=self._anthropic_preserve_dots(),
+                    )
                     retry_response = self._anthropic_messages_create(_ant_kw2)
-                    _retry_msg, _ = _nar2(retry_response, strip_tool_prefix=getattr(self, '_is_anthropic_oauth', False))
+                    _retry_msg, _ = _nar2(
+                        retry_response,
+                        strip_tool_prefix=getattr(self, "_is_anthropic_oauth", False),
+                    )
                     final_response = (_retry_msg.content or "").strip()
                 else:
                     summary_kwargs = {
@@ -4519,22 +5051,36 @@ class AIAgent(ExecutionMixin, StreamingMixin, SessionMixin, ConversationMixin):
                     if summary_extra_body:
                         summary_kwargs["extra_body"] = summary_extra_body
 
-                    summary_response = self._ensure_primary_openai_client(reason="iteration_limit_summary_retry").chat.completions.create(**summary_kwargs)
+                    summary_response = self._ensure_primary_openai_client(
+                        reason="iteration_limit_summary_retry"
+                    ).chat.completions.create(**summary_kwargs)
 
-                    if summary_response.choices and summary_response.choices[0].message.content:
+                    if (
+                        summary_response.choices
+                        and summary_response.choices[0].message.content
+                    ):
                         final_response = summary_response.choices[0].message.content
                     else:
                         final_response = ""
 
                 if final_response:
                     if "<think>" in final_response:
-                        final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
+                        final_response = re.sub(
+                            r"<think>.*?</think>\s*",
+                            "",
+                            final_response,
+                            flags=re.DOTALL,
+                        ).strip()
                     if final_response:
-                        messages.append({"role": "assistant", "content": final_response})
+                        messages.append(
+                            {"role": "assistant", "content": final_response}
+                        )
                     else:
                         final_response = "I reached the iteration limit and couldn't generate a summary."
                 else:
-                    final_response = "I reached the iteration limit and couldn't generate a summary."
+                    final_response = (
+                        "I reached the iteration limit and couldn't generate a summary."
+                    )
 
         except Exception as e:
             logging.warning(f"Failed to get summary response: {e}")
@@ -4569,7 +5115,7 @@ def main(
     save_trajectories: bool = False,
     save_sample: bool = False,
     verbose: bool = False,
-    log_prefix_chars: int = 20
+    log_prefix_chars: int = 20,
 ):
     """
     Main function for running the agent directly.
@@ -4595,58 +5141,69 @@ def main(
     """
     print("🤖 AI Agent with Tool Calling")
     print("=" * 50)
-    
+
     # Handle tool listing
     if list_tools:
-        from model_tools import get_all_tool_names, get_toolset_for_tool, get_available_toolsets
+        from model_tools import (
+            get_all_tool_names,
+            get_toolset_for_tool,
+            get_available_toolsets,
+        )
         from toolsets import get_all_toolsets, get_toolset_info
-        
+
         print("📋 Available Tools & Toolsets:")
         print("-" * 50)
-        
+
         # Show new toolsets system
         print("\n🎯 Predefined Toolsets (New System):")
         print("-" * 40)
         all_toolsets = get_all_toolsets()
-        
+
         # Group by category
         basic_toolsets = []
         composite_toolsets = []
         scenario_toolsets = []
-        
+
         for name, toolset in all_toolsets.items():
             info = get_toolset_info(name)
             if info:
                 entry = (name, info)
                 if name in ["web", "terminal", "vision", "creative", "reasoning"]:
                     basic_toolsets.append(entry)
-                elif name in ["research", "development", "analysis", "content_creation", "full_stack"]:
+                elif name in [
+                    "research",
+                    "development",
+                    "analysis",
+                    "content_creation",
+                    "full_stack",
+                ]:
                     composite_toolsets.append(entry)
                 else:
                     scenario_toolsets.append(entry)
-        
+
         # Print basic toolsets
         print("\n📌 Basic Toolsets:")
         for name, info in basic_toolsets:
-            tools_str = ', '.join(info['resolved_tools']) if info['resolved_tools'] else 'none'
+            tools_str = (
+                ", ".join(info["resolved_tools"]) if info["resolved_tools"] else "none"
+            )
             print(f"  • {name:15} - {info['description']}")
             print(f"    Tools: {tools_str}")
-        
+
         # Print composite toolsets
         print("\n📂 Composite Toolsets (built from other toolsets):")
         for name, info in composite_toolsets:
-            includes_str = ', '.join(info['includes']) if info['includes'] else 'none'
+            includes_str = ", ".join(info["includes"]) if info["includes"] else "none"
             print(f"  • {name:15} - {info['description']}")
             print(f"    Includes: {includes_str}")
             print(f"    Total tools: {info['tool_count']}")
-        
+
         # Print scenario-specific toolsets
         print("\n🎭 Scenario-Specific Toolsets:")
         for name, info in scenario_toolsets:
             print(f"  • {name:20} - {info['description']}")
             print(f"    Total tools: {info['tool_count']}")
-        
-        
+
         # Show legacy toolset compatibility
         print("\n📦 Legacy Toolsets (for backward compatibility):")
         legacy_toolsets = get_available_toolsets()
@@ -4655,47 +5212,57 @@ def main(
             print(f"  {status} {name}: {info['description']}")
             if not info["available"]:
                 print(f"    Requirements: {', '.join(info['requirements'])}")
-        
+
         # Show individual tools
         all_tools = get_all_tool_names()
         print(f"\n🔧 Individual Tools ({len(all_tools)} available):")
         for tool_name in sorted(all_tools):
             toolset = get_toolset_for_tool(tool_name)
             print(f"  📌 {tool_name} (from {toolset})")
-        
+
         print(f"\n💡 Usage Examples:")
         print(f"  # Use predefined toolsets")
-        print(f"  python run_agent.py --enabled_toolsets=research --query='search for Python news'")
-        print(f"  python run_agent.py --enabled_toolsets=development --query='debug this code'")
-        print(f"  python run_agent.py --enabled_toolsets=safe --query='analyze without terminal'")
+        print(
+            f"  python run_agent.py --enabled_toolsets=research --query='search for Python news'"
+        )
+        print(
+            f"  python run_agent.py --enabled_toolsets=development --query='debug this code'"
+        )
+        print(
+            f"  python run_agent.py --enabled_toolsets=safe --query='analyze without terminal'"
+        )
         print(f"  ")
         print(f"  # Combine multiple toolsets")
-        print(f"  python run_agent.py --enabled_toolsets=web,vision --query='analyze website'")
+        print(
+            f"  python run_agent.py --enabled_toolsets=web,vision --query='analyze website'"
+        )
         print(f"  ")
         print(f"  # Disable toolsets")
-        print(f"  python run_agent.py --disabled_toolsets=terminal --query='no command execution'")
+        print(
+            f"  python run_agent.py --disabled_toolsets=terminal --query='no command execution'"
+        )
         print(f"  ")
         print(f"  # Run with trajectory saving enabled")
         print(f"  python run_agent.py --save_trajectories --query='your question here'")
         return
-    
+
     # Parse toolset selection arguments
     enabled_toolsets_list = None
     disabled_toolsets_list = None
-    
+
     if enabled_toolsets:
         enabled_toolsets_list = [t.strip() for t in enabled_toolsets.split(",")]
         print(f"🎯 Enabled toolsets: {enabled_toolsets_list}")
-    
+
     if disabled_toolsets:
         disabled_toolsets_list = [t.strip() for t in disabled_toolsets.split(",")]
         print(f"🚫 Disabled toolsets: {disabled_toolsets_list}")
-    
+
     if save_trajectories:
         print(f"💾 Trajectory saving: ENABLED")
         print(f"   - Successful conversations → trajectory_samples.jsonl")
         print(f"   - Failed conversations → failed_trajectories.jsonl")
-    
+
     # Initialize agent with provided parameters
     try:
         agent = AIAgent(
@@ -4707,12 +5274,12 @@ def main(
             disabled_toolsets=disabled_toolsets_list,
             save_trajectories=save_trajectories,
             verbose_logging=verbose,
-            log_prefix_chars=log_prefix_chars
+            log_prefix_chars=log_prefix_chars,
         )
     except RuntimeError as e:
         print(f"❌ Failed to initialize agent: {e}")
         return
-    
+
     # Use provided query or default to Python 3.13 example
     if query is None:
         user_query = (
@@ -4721,45 +5288,43 @@ def main(
         )
     else:
         user_query = query
-    
+
     print(f"\n📝 User Query: {user_query}")
     print("\n" + "=" * 50)
-    
+
     # Run conversation
     result = agent.run_conversation(user_query)
-    
+
     print("\n" + "=" * 50)
     print("📋 CONVERSATION SUMMARY")
     print("=" * 50)
     print(f"✅ Completed: {result['completed']}")
     print(f"📞 API Calls: {result['api_calls']}")
     print(f"💬 Messages: {len(result['messages'])}")
-    
-    if result['final_response']:
+
+    if result["final_response"]:
         print(f"\n🎯 FINAL RESPONSE:")
         print("-" * 30)
-        print(result['final_response'])
-    
+        print(result["final_response"])
+
     # Save sample trajectory to UUID-named file if requested
     if save_sample:
         sample_id = str(uuid.uuid4())[:8]
         sample_filename = f"sample_{sample_id}.json"
-        
+
         # Convert messages to trajectory format (same as batch_runner)
         trajectory = agent._convert_to_trajectory_format(
-            result['messages'], 
-            user_query, 
-            result['completed']
+            result["messages"], user_query, result["completed"]
         )
-        
+
         entry = {
             "conversations": trajectory,
             "timestamp": datetime.now().isoformat(),
             "model": model,
-            "completed": result['completed'],
-            "query": user_query
+            "completed": result["completed"],
+            "query": user_query,
         }
-        
+
         try:
             with open(sample_filename, "w", encoding="utf-8") as f:
                 # Pretty-print JSON with indent for readability
@@ -4767,7 +5332,7 @@ def main(
             print(f"\n💾 Sample trajectory saved to: {sample_filename}")
         except Exception as e:
             print(f"\n⚠️ Failed to save sample: {e}")
-    
+
     print("\n👋 Agent execution completed!")
 
 
@@ -4787,4 +5352,6 @@ if __name__ == "__main__":
     if fire is not None:
         fire.Fire(main)
     else:
-        print("Error: fire library not installed. Please install it with 'pip install fire'.")
+        print(
+            "Error: fire library not installed. Please install it with 'pip install fire'."
+        )

@@ -13,7 +13,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from agent.utils import atomic_json_write, convert_scratchpad_to_think
+from agent.trajectory import convert_scratchpad_to_think
+from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class SessionMixin:
 
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.
-        
+
         This method encapsulates the reset logic for all session-level metrics
         including:
         - Token usage counters (input, output, total, prompt, completion)
@@ -32,10 +33,10 @@ class SessionMixin:
         - Reasoning tokens
         - Estimated cost tracking
         - Context compressor internal counters
-        
+
         The method safely handles optional attributes (e.g., context compressor)
         using ``hasattr`` checks.
-        
+
         This keeps the counter reset logic DRY and maintainable in one place
         rather than scattering it across multiple methods.
         """
@@ -52,7 +53,7 @@ class SessionMixin:
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
-        
+
         # Context compressor internal counters (if present)
         if hasattr(self, "context_compressor") and self.context_compressor:
             self.context_compressor.last_prompt_tokens = 0
@@ -60,9 +61,10 @@ class SessionMixin:
             self.context_compressor.last_total_tokens = 0
             self.context_compressor.compression_count = 0
             self.context_compressor._context_probed = False
-    
 
-    def _persist_session(self, messages: List[Dict], conversation_history: Optional[List[Dict]] = None):
+    def _persist_session(
+        self, messages: List[Dict], conversation_history: Optional[List[Dict]] = None
+    ):
         """Save session state to both JSON log and SQLite on any exit path.
 
         Ensures conversations are never lost, even on errors or early returns.
@@ -72,8 +74,9 @@ class SessionMixin:
         self._save_session_log(messages)
         self._flush_messages_to_session_db(messages, conversation_history)
 
-
-    def _flush_messages_to_session_db(self, messages: List[Dict], conversation_history: Optional[List[Dict]] = None):
+    def _flush_messages_to_session_db(
+        self, messages: List[Dict], conversation_history: Optional[List[Dict]] = None
+    ):
         """Persist any un-flushed messages to the SQLite session store.
 
         Uses _last_flushed_db_idx to track which messages have already been
@@ -110,16 +113,14 @@ class SessionMixin:
         except Exception as e:
             logger.debug("Session DB append_message failed: %s", e)
 
-
     def _clean_session_content(content: str) -> str:
         """Convert REASONING_SCRATCHPAD to think tags and clean up whitespace."""
         if not content:
             return content
         content = convert_scratchpad_to_think(content)
-        content = re.sub(r'\n+(<think>)', r'\n\1', content)
-        content = re.sub(r'(</think>)\n+', r'\1\n', content)
+        content = re.sub(r"\n+(<think>)", r"\n\1", content)
+        content = re.sub(r"(</think>)\n+", r"\1\n", content)
         return content.strip()
-
 
     def _save_session_log(self, messages: Optional[List[Dict[str, Any]]] = None):
         """
@@ -169,5 +170,3 @@ class SessionMixin:
         except Exception as e:
             if self.verbose_logging:
                 logging.warning(f"Failed to save session log: {e}")
-    
-
