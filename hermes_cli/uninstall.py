@@ -388,7 +388,7 @@ def run_uninstall(args):
         print("To reinstall later with your existing settings:")
         print(
             color(
-                "  curl -fsSL https://raw.githubusercontent.com/nelohenriq/hermes-agent-plus/main/scripts/install.sh | bash",
+                "  curl -fsSL https://raw.githubusercontent.com/nelohenriq/hermes-agent-plus/master/scripts/install.sh | bash",
                 Colors.DIM,
             )
         )

@@ -2912,7 +2912,7 @@ def cmd_update(args):
         else:
             print("✗ Not a git repository. Please reinstall:")
             print(
-                "  curl -fsSL https://raw.githubusercontent.com/nelohenriq/hermes-agent-plus/main/scripts/install.sh | bash"
+                "  curl -fsSL https://raw.githubusercontent.com/nelohenriq/hermes-agent-plus/master/scripts/install.sh | bash"
             )
             sys.exit(1)
 
