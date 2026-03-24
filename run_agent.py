@@ -1366,64 +1366,6 @@ class AIAgent(
             return
         self._safe_print(*args, **kwargs)
 
-    def _is_direct_openai_url(self, base_url: Optional[str] = None) -> bool:
-        """Return True when a base URL targets OpenAI's native API."""
-        url = (base_url or self._base_url_lower).lower()
-        return "api.openai.com" in url and "openrouter" not in url
-
-    def _max_tokens_param(self, value: int) -> dict:
-        """Return the correct max tokens kwarg for the current provider.
-
-        OpenAI's newer models (gpt-4o, o-series, gpt-5+) require
-        'max_completion_tokens'. OpenRouter, local models, and older
-        OpenAI models use 'max_tokens'.
-        """
-        if self._is_direct_openai_url():
-            return {"max_completion_tokens": value}
-        return {"max_tokens": value}
-
-    def _has_content_after_think_block(self, content: str) -> bool:
-        """
-        Check if content has actual text after any reasoning/thinking blocks.
-
-        This detects cases where the model only outputs reasoning but no actual
-        response, which indicates an incomplete generation that should be retried.
-        Must stay in sync with _strip_think_blocks() tag variants.
-
-        Args:
-            content: The assistant message content to check
-
-        Returns:
-            True if there's meaningful content after think blocks, False otherwise
-        """
-        if not content:
-            return False
-
-        # Remove all reasoning tag variants (must match _strip_think_blocks)
-        cleaned = self._strip_think_blocks(content)
-
-        # Check if there's any non-whitespace content remaining
-        return bool(cleaned.strip())
-
-    def _strip_think_blocks(self, content: str) -> str:
-        """Remove reasoning/thinking blocks from content, returning only visible text."""
-        if not content:
-            return ""
-        # Strip all reasoning tag variants: <think>, <thinking>, <THINKING>,
-        # <reasoning>, <REASONING_SCRATCHPAD>
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-        content = re.sub(
-            r"<thinking>.*?</thinking>", "", content, flags=re.DOTALL | re.IGNORECASE
-        )
-        content = re.sub(r"<reasoning>.*?</reasoning>", "", content, flags=re.DOTALL)
-        content = re.sub(
-            r"<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>",
-            "",
-            content,
-            flags=re.DOTALL,
-        )
-        return content
-
     def _looks_like_codex_intermediate_ack(
         self,
         user_message: str,
@@ -1503,59 +1445,6 @@ class AIAgent(
         return (
             user_targets_workspace or assistant_targets_workspace
         ) and assistant_mentions_action
-
-    def _extract_reasoning(self, assistant_message) -> Optional[str]:
-        """
-        Extract reasoning/thinking content from an assistant message.
-
-        OpenRouter and various providers can return reasoning in multiple formats:
-        1. message.reasoning - Direct reasoning field (DeepSeek, Qwen, etc.)
-        2. message.reasoning_content - Alternative field (Moonshot AI, Novita, etc.)
-        3. message.reasoning_details - Array of {type, summary, ...} objects (OpenRouter unified)
-
-        Args:
-            assistant_message: The assistant message object from the API response
-
-        Returns:
-            Combined reasoning text, or None if no reasoning found
-        """
-        reasoning_parts = []
-
-        # Check direct reasoning field
-        if hasattr(assistant_message, "reasoning") and assistant_message.reasoning:
-            reasoning_parts.append(assistant_message.reasoning)
-
-        # Check reasoning_content field (alternative name used by some providers)
-        if (
-            hasattr(assistant_message, "reasoning_content")
-            and assistant_message.reasoning_content
-        ):
-            # Don't duplicate if same as reasoning
-            if assistant_message.reasoning_content not in reasoning_parts:
-                reasoning_parts.append(assistant_message.reasoning_content)
-
-        # Check reasoning_details array (OpenRouter unified format)
-        # Format: [{"type": "reasoning.summary", "summary": "...", ...}, ...]
-        if (
-            hasattr(assistant_message, "reasoning_details")
-            and assistant_message.reasoning_details
-        ):
-            for detail in assistant_message.reasoning_details:
-                if isinstance(detail, dict):
-                    # Extract summary from reasoning detail object
-                    summary = (
-                        detail.get("summary")
-                        or detail.get("content")
-                        or detail.get("text")
-                    )
-                    if summary and summary not in reasoning_parts:
-                        reasoning_parts.append(summary)
-
-        # Combine all reasoning parts
-        if reasoning_parts:
-            return "\n\n".join(reasoning_parts)
-
-        return None
 
     def _cleanup_task_resources(self, task_id: str) -> None:
         """Clean up VM and browser resources for a given task."""
