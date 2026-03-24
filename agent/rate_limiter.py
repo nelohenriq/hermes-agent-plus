@@ -33,8 +33,19 @@ import os
 import sqlite3
 import threading
 import time
-import fcntl
 from pathlib import Path
+
+# fcntl is Unix-only; on Windows use msvcrt for file locking
+fcntl = None
+msvcrt = None
+try:
+    import fcntl
+except ImportError:
+    pass
+try:
+    import msvcrt
+except ImportError:
+    pass
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 from enum import Enum
@@ -42,6 +53,7 @@ from enum import Enum
 
 class BackoffStrategy(Enum):
     """Backoff strategies when rate limited."""
+
     EXPONENTIAL = "exponential"
     LINEAR = "linear"
     FIXED = "fixed"
@@ -50,6 +62,7 @@ class BackoffStrategy(Enum):
 @dataclass
 class ProviderLimits:
     """Rate limit configuration for a provider."""
+
     requests_per_minute: int = 60
     requests_per_hour: int = 1000
     tokens_per_minute: int = 40000
@@ -172,19 +185,26 @@ class CoordinatedRateLimiter:
     def _reset_windows_coordinated(self, now: float) -> Dict[str, Any]:
         """Reset windows for coordinated mode using SQLite."""
         # File locking for cross-process coordination
-        lock_file = self.DB_PATH.with_suffix('.lock')
+        lock_file = self.DB_PATH.with_suffix(".lock")
         lock_file.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(lock_file, 'w') as lock_f:
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        with open(lock_file, "w") as lock_f:
+            if fcntl:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            elif msvcrt:
+                msvcrt.locking(lock_f.fileno(), msvcrt.LK_LOCK, 1)
 
             try:
                 with sqlite3.connect(self.DB_PATH) as conn:
                     # Get current state
-                    row = conn.execute(f"SELECT * FROM limits_{self.provider} WHERE id = 1").fetchone()
+                    row = conn.execute(
+                        f"SELECT * FROM limits_{self.provider} WHERE id = 1"
+                    ).fetchone()
                     if not row:
                         # Initialize if missing
-                        conn.execute(f"INSERT INTO limits_{self.provider} (id) VALUES (1)")
+                        conn.execute(
+                            f"INSERT INTO limits_{self.provider} (id) VALUES (1)"
+                        )
                         row = (1, 0, 0, 0, now, now, 0, 0.0)
 
                     minute_start = row[4] or now
@@ -204,10 +224,15 @@ class CoordinatedRateLimiter:
                     if updates:
                         set_clause = ", ".join(f"{k} = ?" for k in updates.keys())
                         values = list(updates.values())
-                        conn.execute(f"UPDATE limits_{self.provider} SET {set_clause} WHERE id = 1", values)
+                        conn.execute(
+                            f"UPDATE limits_{self.provider} SET {set_clause} WHERE id = 1",
+                            values,
+                        )
 
                     # Return current state
-                    row = conn.execute(f"SELECT * FROM limits_{self.provider} WHERE id = 1").fetchone()
+                    row = conn.execute(
+                        f"SELECT * FROM limits_{self.provider} WHERE id = 1"
+                    ).fetchone()
                     return {
                         "minute_requests": row[1],
                         "hour_requests": row[2],
@@ -217,7 +242,10 @@ class CoordinatedRateLimiter:
                     }
 
             finally:
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                if fcntl:
+                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                elif msvcrt:
+                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
 
     def can_proceed(self, estimated_tokens: int = 0) -> Dict[str, Any]:
         """
@@ -236,13 +264,19 @@ class CoordinatedRateLimiter:
         reasons = []
 
         if state["minute_requests"] >= self.limits.requests_per_minute:
-            reasons.append(f"minute_requests ({state['minute_requests']}/{self.limits.requests_per_minute})")
+            reasons.append(
+                f"minute_requests ({state['minute_requests']}/{self.limits.requests_per_minute})"
+            )
 
         if state["hour_requests"] >= self.limits.requests_per_hour:
-            reasons.append(f"hour_requests ({state['hour_requests']}/{self.limits.requests_per_hour})")
+            reasons.append(
+                f"hour_requests ({state['hour_requests']}/{self.limits.requests_per_hour})"
+            )
 
         if state["minute_tokens"] + estimated_tokens > self.limits.tokens_per_minute:
-            reasons.append(f"minute_tokens ({state['minute_tokens']}/{self.limits.tokens_per_minute})")
+            reasons.append(
+                f"minute_tokens ({state['minute_tokens']}/{self.limits.tokens_per_minute})"
+            )
 
         allowed = len(reasons) == 0
 
@@ -255,17 +289,32 @@ class CoordinatedRateLimiter:
             "allowed": allowed,
             "reason": "; ".join(reasons) if reasons else None,
             "wait_time": wait_time,
-            "remaining_minute": max(0, self.limits.requests_per_minute - state["minute_requests"]),
-            "remaining_hour": max(0, self.limits.requests_per_hour - state["hour_requests"]),
-            "remaining_tokens": max(0, self.limits.tokens_per_minute - state["minute_tokens"] - estimated_tokens),
+            "remaining_minute": max(
+                0, self.limits.requests_per_minute - state["minute_requests"]
+            ),
+            "remaining_hour": max(
+                0, self.limits.requests_per_hour - state["hour_requests"]
+            ),
+            "remaining_tokens": max(
+                0,
+                self.limits.tokens_per_minute
+                - state["minute_tokens"]
+                - estimated_tokens,
+            ),
         }
 
     def _calculate_backoff(self, consecutive_limits: int) -> float:
         """Calculate backoff time based on strategy."""
         if self.limits.backoff_strategy == BackoffStrategy.EXPONENTIAL:
-            backoff = min(self.limits.max_backoff, self.limits.min_backoff * (2 ** consecutive_limits))
+            backoff = min(
+                self.limits.max_backoff,
+                self.limits.min_backoff * (2**consecutive_limits),
+            )
         elif self.limits.backoff_strategy == BackoffStrategy.LINEAR:
-            backoff = min(self.limits.max_backoff, self.limits.min_backoff * (consecutive_limits + 1))
+            backoff = min(
+                self.limits.max_backoff,
+                self.limits.min_backoff * (consecutive_limits + 1),
+            )
         else:  # FIXED
             backoff = self.limits.min_backoff
 
@@ -296,25 +345,34 @@ class CoordinatedRateLimiter:
 
     def _record_request_coordinated(self, tokens_used: int, now: float):
         """Record request for coordinated mode."""
-        lock_file = self.DB_PATH.with_suffix('.lock')
+        lock_file = self.DB_PATH.with_suffix(".lock")
 
-        with open(lock_file, 'w') as lock_f:
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        with open(lock_file, "w") as lock_f:
+            if fcntl:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            elif msvcrt:
+                msvcrt.locking(lock_f.fileno(), msvcrt.LK_LOCK, 1)
 
             try:
                 with sqlite3.connect(self.DB_PATH) as conn:
                     # Update counters
-                    conn.execute(f"""
+                    conn.execute(
+                        f"""
                         UPDATE limits_{self.provider} SET
                             minute_requests = minute_requests + 1,
                             hour_requests = hour_requests + 1,
                             minute_tokens = minute_tokens + ?,
                             consecutive_limits = 0
                         WHERE id = 1
-                    """, (tokens_used,))
+                    """,
+                        (tokens_used,),
+                    )
 
             finally:
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                if fcntl:
+                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                elif msvcrt:
+                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
 
     def record_rate_limit(self):
         """Record a rate limit event."""
@@ -331,28 +389,39 @@ class CoordinatedRateLimiter:
 
     def _record_rate_limit_coordinated(self):
         """Record rate limit for coordinated mode."""
-        lock_file = self.DB_PATH.with_suffix('.lock')
+        lock_file = self.DB_PATH.with_suffix(".lock")
 
-        with open(lock_file, 'w') as lock_f:
-            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        with open(lock_file, "w") as lock_f:
+            if fcntl:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            elif msvcrt:
+                msvcrt.locking(lock_f.fileno(), msvcrt.LK_LOCK, 1)
 
             try:
                 with sqlite3.connect(self.DB_PATH) as conn:
                     # Get current consecutive limits
-                    row = conn.execute(f"SELECT consecutive_limits FROM limits_{self.provider} WHERE id = 1").fetchone()
+                    row = conn.execute(
+                        f"SELECT consecutive_limits FROM limits_{self.provider} WHERE id = 1"
+                    ).fetchone()
                     consecutive = (row[0] if row else 0) + 1
 
                     # Update consecutive limits and last backoff
                     backoff = self._calculate_backoff(consecutive)
-                    conn.execute(f"""
+                    conn.execute(
+                        f"""
                         UPDATE limits_{self.provider} SET
                             consecutive_limits = ?,
                             last_backoff = ?
                         WHERE id = 1
-                    """, (consecutive, backoff))
+                    """,
+                        (consecutive, backoff),
+                    )
 
             finally:
-                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                if fcntl:
+                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+                elif msvcrt:
+                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
 
     def get_wait_time(self) -> float:
         """Get recommended wait time before next request."""
@@ -382,10 +451,19 @@ class CoordinatedRateLimiter:
                 "consecutive_limits": state["consecutive_limits"],
             },
             "utilization": {
-                "minute_request_percent": (state["minute_requests"] / max(1, self.limits.requests_per_minute)) * 100,
-                "hour_request_percent": (state["hour_requests"] / max(1, self.limits.requests_per_hour)) * 100,
-                "minute_token_percent": (state["minute_tokens"] / max(1, self.limits.tokens_per_minute)) * 100,
-            }
+                "minute_request_percent": (
+                    state["minute_requests"] / max(1, self.limits.requests_per_minute)
+                )
+                * 100,
+                "hour_request_percent": (
+                    state["hour_requests"] / max(1, self.limits.requests_per_hour)
+                )
+                * 100,
+                "minute_token_percent": (
+                    state["minute_tokens"] / max(1, self.limits.tokens_per_minute)
+                )
+                * 100,
+            },
         }
 
 
@@ -394,7 +472,9 @@ _limiter_cache: Dict[str, CoordinatedRateLimiter] = {}
 _cache_lock = threading.Lock()
 
 
-def get_rate_limiter(provider: str, coordinated: Optional[bool] = None) -> CoordinatedRateLimiter:
+def get_rate_limiter(
+    provider: str, coordinated: Optional[bool] = None
+) -> CoordinatedRateLimiter:
     """
     Get or create a rate limiter for a provider.
 
@@ -407,7 +487,11 @@ def get_rate_limiter(provider: str, coordinated: Optional[bool] = None) -> Coord
     """
     # Default coordinated mode from environment
     if coordinated is None:
-        coordinated = os.getenv("HERMES_COORDINATED_RATE_LIMITING", "true").lower() in ("true", "1", "yes")
+        coordinated = os.getenv("HERMES_COORDINATED_RATE_LIMITING", "true").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
     cache_key = f"{provider}:{coordinated}"
 

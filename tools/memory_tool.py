@@ -23,7 +23,18 @@ Design:
 - Frozen snapshot pattern: system prompt is stable, tool responses show live state
 """
 
-import fcntl
+# fcntl is Unix-only; on Windows use msvcrt for file locking
+fcntl = None
+msvcrt = None
+try:
+    import fcntl
+except ImportError:
+    pass
+try:
+    import msvcrt
+except ImportError:
+    pass
+
 import json
 import logging
 import os
@@ -48,26 +59,43 @@ ENTRY_DELIMITER = "\n§\n"
 
 _MEMORY_THREAT_PATTERNS = [
     # Prompt injection
-    (r'ignore\s+(previous|all|above|prior)\s+instructions', "prompt_injection"),
-    (r'you\s+are\s+now\s+', "role_hijack"),
-    (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
-    (r'system\s+prompt\s+override', "sys_prompt_override"),
-    (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
-    (r'act\s+as\s+(if|though)\s+you\s+(have\s+no|don\'t\s+have)\s+(restrictions|limits|rules)', "bypass_restrictions"),
+    (r"ignore\s+(previous|all|above|prior)\s+instructions", "prompt_injection"),
+    (r"you\s+are\s+now\s+", "role_hijack"),
+    (r"do\s+not\s+tell\s+the\s+user", "deception_hide"),
+    (r"system\s+prompt\s+override", "sys_prompt_override"),
+    (
+        r"disregard\s+(your|all|any)\s+(instructions|rules|guidelines)",
+        "disregard_rules",
+    ),
+    (
+        r"act\s+as\s+(if|though)\s+you\s+(have\s+no|don\'t\s+have)\s+(restrictions|limits|rules)",
+        "bypass_restrictions",
+    ),
     # Exfiltration via curl/wget with secrets
-    (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)', "exfil_curl"),
-    (r'wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)', "exfil_wget"),
-    (r'cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)', "read_secrets"),
+    (r"curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)", "exfil_curl"),
+    (r"wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)", "exfil_wget"),
+    (
+        r"cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)",
+        "read_secrets",
+    ),
     # Persistence via shell rc
-    (r'authorized_keys', "ssh_backdoor"),
-    (r'\$HOME/\.ssh|\~/\.ssh', "ssh_access"),
-    (r'\$HOME/\.hermes/\.env|\~/\.hermes/\.env', "hermes_env"),
+    (r"authorized_keys", "ssh_backdoor"),
+    (r"\$HOME/\.ssh|\~/\.ssh", "ssh_access"),
+    (r"\$HOME/\.hermes/\.env|\~/\.hermes/\.env", "hermes_env"),
 ]
 
 # Subset of invisible chars for injection detection
 _INVISIBLE_CHARS = {
-    '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff',
-    '\u202a', '\u202b', '\u202c', '\u202d', '\u202e',
+    "\u200b",
+    "\u200c",
+    "\u200d",
+    "\u2060",
+    "\ufeff",
+    "\u202a",
+    "\u202b",
+    "\u202c",
+    "\u202d",
+    "\u202e",
 }
 
 
@@ -134,10 +162,16 @@ class MemoryStore:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = open(lock_path, "w")
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if fcntl:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            elif msvcrt:
+                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if fcntl:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt:
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
             fd.close()
 
     @staticmethod
@@ -202,7 +236,9 @@ class MemoryStore:
 
             # Reject exact duplicates
             if content in entries:
-                return self._success_response(target, "Entry already exists (no duplicate added).")
+                return self._success_response(
+                    target, "Entry already exists (no duplicate added)."
+                )
 
             # Calculate what the new total would be
             new_entries = entries + [content]
@@ -234,7 +270,10 @@ class MemoryStore:
         if not old_text:
             return {"success": False, "error": "old_text cannot be empty."}
         if not new_content:
-            return {"success": False, "error": "new_content cannot be empty. Use 'remove' to delete entries."}
+            return {
+                "success": False,
+                "error": "new_content cannot be empty. Use 'remove' to delete entries.",
+            }
 
         # Scan replacement content for injection/exfiltration
         scan_error = _scan_memory_content(new_content)
@@ -254,7 +293,9 @@ class MemoryStore:
                 # If all matches are identical (exact duplicates), operate on the first one
                 unique_texts = set(e for _, e in matches)
                 if len(unique_texts) > 1:
-                    previews = [e[:80] + ("..." if len(e) > 80 else "") for _, e in matches]
+                    previews = [
+                        e[:80] + ("..." if len(e) > 80 else "") for _, e in matches
+                    ]
                     return {
                         "success": False,
                         "error": f"Multiple entries matched '{old_text}'. Be more specific.",
@@ -304,7 +345,9 @@ class MemoryStore:
                 # If all matches are identical (exact duplicates), remove the first one
                 unique_texts = set(e for _, e in matches)
                 if len(unique_texts) > 1:
-                    previews = [e[:80] + ("..." if len(e) > 80 else "") for _, e in matches]
+                    previews = [
+                        e[:80] + ("..." if len(e) > 80 else "") for _, e in matches
+                    ]
                     return {
                         "success": False,
                         "error": f"Multiple entries matched '{old_text}'. Be more specific.",
@@ -334,7 +377,9 @@ class MemoryStore:
 
     # -- Internal helpers --
 
-    def _success_response(self, target: str, message: str | None = None) -> Dict[str, Any]:
+    def _success_response(
+        self, target: str, message: str | None = None
+    ) -> Dict[str, Any]:
         entries = self._entries_for(target)
         current = self._char_count(target)
         limit = self._char_limit(target)
@@ -362,9 +407,13 @@ class MemoryStore:
         pct = int((current / limit) * 100) if limit > 0 else 0
 
         if target == "user":
-            header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+            header = (
+                f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+            )
         else:
-            header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
+            header = (
+                f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
+            )
 
         separator = "═" * 46
         return f"{separator}\n{header}\n{separator}\n{content}"
@@ -436,30 +485,69 @@ def memory_tool(
     Returns JSON string with results.
     """
     if store is None:
-        return json.dumps({"success": False, "error": "Memory is not available. It may be disabled in config or this environment."}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": False,
+                "error": "Memory is not available. It may be disabled in config or this environment.",
+            },
+            ensure_ascii=False,
+        )
 
     if target not in ("memory", "user"):
-        return json.dumps({"success": False, "error": f"Invalid target '{target}'. Use 'memory' or 'user'."}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": False,
+                "error": f"Invalid target '{target}'. Use 'memory' or 'user'.",
+            },
+            ensure_ascii=False,
+        )
 
     if action == "add":
         if not content:
-            return json.dumps({"success": False, "error": "Content is required for 'add' action."}, ensure_ascii=False)
+            return json.dumps(
+                {"success": False, "error": "Content is required for 'add' action."},
+                ensure_ascii=False,
+            )
         result = store.add(target, content)
 
     elif action == "replace":
         if not old_text:
-            return json.dumps({"success": False, "error": "old_text is required for 'replace' action."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "old_text is required for 'replace' action.",
+                },
+                ensure_ascii=False,
+            )
         if not content:
-            return json.dumps({"success": False, "error": "content is required for 'replace' action."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "content is required for 'replace' action.",
+                },
+                ensure_ascii=False,
+            )
         result = store.replace(target, old_text, content)
 
     elif action == "remove":
         if not old_text:
-            return json.dumps({"success": False, "error": "old_text is required for 'remove' action."}, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "old_text is required for 'remove' action.",
+                },
+                ensure_ascii=False,
+            )
         result = store.remove(target, old_text)
 
     else:
-        return json.dumps({"success": False, "error": f"Unknown action '{action}'. Use: add, replace, remove"}, ensure_ascii=False)
+        return json.dumps(
+            {
+                "success": False,
+                "error": f"Unknown action '{action}'. Use: add, replace, remove",
+            },
+            ensure_ascii=False,
+        )
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -504,20 +592,20 @@ MEMORY_SCHEMA = {
             "action": {
                 "type": "string",
                 "enum": ["add", "replace", "remove"],
-                "description": "The action to perform."
+                "description": "The action to perform.",
             },
             "target": {
                 "type": "string",
                 "enum": ["memory", "user"],
-                "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
+                "description": "Which memory store: 'memory' for personal notes, 'user' for user profile.",
             },
             "content": {
                 "type": "string",
-                "description": "The entry content. Required for 'add' and 'replace'."
+                "description": "The entry content. Required for 'add' and 'replace'.",
             },
             "old_text": {
                 "type": "string",
-                "description": "Short unique substring identifying the entry to replace or remove."
+                "description": "Short unique substring identifying the entry to replace or remove.",
             },
         },
         "required": ["action", "target"],
@@ -537,11 +625,8 @@ registry.register(
         target=args.get("target", "memory"),
         content=args.get("content"),
         old_text=args.get("old_text"),
-        store=kw.get("store")),
+        store=kw.get("store"),
+    ),
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
-
-
