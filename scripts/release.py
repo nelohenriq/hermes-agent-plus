@@ -119,7 +119,8 @@ def git(*args, cwd=None):
     """Run a git command and return stdout."""
     result = subprocess.run(
         ["git"] + list(args),
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
         cwd=cwd or str(REPO_ROOT),
     )
     if result.returncode != 0:
@@ -222,13 +223,25 @@ def categorize_commit(subject: str) -> str:
         "breaking": [r"^breaking[\s:(]", r"^!:", r"BREAKING CHANGE"],
         "features": [r"^feat[\s:(]", r"^feature[\s:(]", r"^add[\s:(]"],
         "fixes": [r"^fix[\s:(]", r"^bugfix[\s:(]", r"^bug[\s:(]", r"^hotfix[\s:(]"],
-        "improvements": [r"^improve[\s:(]", r"^perf[\s:(]", r"^enhance[\s:(]",
-                         r"^refactor[\s:(]", r"^cleanup[\s:(]", r"^clean[\s:(]",
-                         r"^update[\s:(]", r"^optimize[\s:(]"],
+        "improvements": [
+            r"^improve[\s:(]",
+            r"^perf[\s:(]",
+            r"^enhance[\s:(]",
+            r"^refactor[\s:(]",
+            r"^cleanup[\s:(]",
+            r"^clean[\s:(]",
+            r"^update[\s:(]",
+            r"^optimize[\s:(]",
+        ],
         "docs": [r"^doc[\s:(]", r"^docs[\s:(]"],
         "tests": [r"^test[\s:(]", r"^tests[\s:(]"],
-        "chore": [r"^chore[\s:(]", r"^ci[\s:(]", r"^build[\s:(]",
-                  r"^deps[\s:(]", r"^bump[\s:(]"],
+        "chore": [
+            r"^chore[\s:(]",
+            r"^ci[\s:(]",
+            r"^build[\s:(]",
+            r"^deps[\s:(]",
+            r"^bump[\s:(]",
+        ],
     }
 
     for category, regexes in patterns.items():
@@ -250,7 +263,12 @@ def categorize_commit(subject: str) -> str:
 def clean_subject(subject: str) -> str:
     """Clean up a commit subject for display."""
     # Remove conventional commit prefix
-    cleaned = re.sub(r"^(feat|fix|docs|chore|refactor|test|perf|ci|build|improve|add|update|cleanup|hotfix|breaking|enhance|optimize|bugfix|bug|feature|tests|deps|bump)[\s:(!]+\s*", "", subject, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^(feat|fix|docs|chore|refactor|test|perf|ci|build|improve|add|update|cleanup|hotfix|breaking|enhance|optimize|bugfix|bug|feature|tests|deps|bump)[\s:(!]+\s*",
+        "",
+        subject,
+        flags=re.IGNORECASE,
+    )
     # Remove trailing issue refs that are redundant with PR links
     cleaned = cleaned.strip()
     # Capitalize first letter
@@ -268,7 +286,8 @@ def get_commits(since_tag=None):
 
     # Format: hash|author_name|author_email|subject
     log = git(
-        "log", range_spec,
+        "log",
+        range_spec,
         "--format=%H|%an|%ae|%s",
         "--no-merges",
     )
@@ -284,15 +303,17 @@ def get_commits(since_tag=None):
         if len(parts) != 4:
             continue
         sha, name, email, subject = parts
-        commits.append({
-            "sha": sha,
-            "short_sha": sha[:8],
-            "author_name": name,
-            "author_email": email,
-            "subject": subject,
-            "category": categorize_commit(subject),
-            "github_author": resolve_author(name, email),
-        })
+        commits.append(
+            {
+                "sha": sha,
+                "short_sha": sha[:8],
+                "author_name": name,
+                "author_email": email,
+                "subject": subject,
+                "category": categorize_commit(subject),
+                "github_author": resolve_author(name, email),
+            }
+        )
 
     return commits
 
@@ -305,8 +326,14 @@ def get_pr_number(subject: str) -> str:
     return None
 
 
-def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/NousResearch/hermes-agent",
-                       prev_tag=None, first_release=False):
+def generate_changelog(
+    commits,
+    tag_name,
+    semver,
+    repo_url="https://github.com/nelohenriq/hermes-agent-plus",
+    prev_tag=None,
+    first_release=False,
+):
     """Generate markdown changelog from categorized commits."""
     lines = []
 
@@ -319,8 +346,12 @@ def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/N
     lines.append("")
 
     if first_release:
-        lines.append("> 🎉 **First official release!** This marks the beginning of regular weekly releases")
-        lines.append("> for Hermes Agent. See below for everything included in this initial release.")
+        lines.append(
+            "> 🎉 **First official release!** This marks the beginning of regular weekly releases"
+        )
+        lines.append(
+            "> for Hermes Agent. See below for everything included in this initial release."
+        )
         lines.append("")
 
     # Group commits by category
@@ -364,7 +395,9 @@ def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/N
             if pr_num:
                 parts.append(f"([#{pr_num}]({repo_url}/pull/{pr_num}))")
             else:
-                parts.append(f"([`{commit['short_sha']}`]({repo_url}/commit/{commit['sha']}))")
+                parts.append(
+                    f"([`{commit['short_sha']}`]({repo_url}/commit/{commit['sha']}))"
+                )
 
             if author not in teknium_aliases:
                 parts.append(f"— {author}")
@@ -395,7 +428,9 @@ def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/N
 
     # Full changelog link
     if prev_tag:
-        lines.append(f"**Full Changelog**: [{prev_tag}...{tag_name}]({repo_url}/compare/{prev_tag}...{tag_name})")
+        lines.append(
+            f"**Full Changelog**: [{prev_tag}...{tag_name}]({repo_url}/compare/{prev_tag}...{tag_name})"
+        )
     else:
         lines.append(f"**Full Changelog**: [{tag_name}]({repo_url}/commits/{tag_name})")
     lines.append("")
@@ -405,16 +440,27 @@ def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/N
 
 def main():
     parser = argparse.ArgumentParser(description="Hermes Agent Release Tool")
-    parser.add_argument("--bump", choices=["major", "minor", "patch"],
-                        help="Which semver component to bump")
-    parser.add_argument("--publish", action="store_true",
-                        help="Actually create the tag and GitHub release (otherwise dry run)")
-    parser.add_argument("--date", type=str,
-                        help="Override CalVer date (format: YYYY.M.D)")
-    parser.add_argument("--first-release", action="store_true",
-                        help="Mark as first release (no previous tag expected)")
-    parser.add_argument("--output", type=str,
-                        help="Write changelog to file instead of stdout")
+    parser.add_argument(
+        "--bump",
+        choices=["major", "minor", "patch"],
+        help="Which semver component to bump",
+    )
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="Actually create the tag and GitHub release (otherwise dry run)",
+    )
+    parser.add_argument(
+        "--date", type=str, help="Override CalVer date (format: YYYY.M.D)"
+    )
+    parser.add_argument(
+        "--first-release",
+        action="store_true",
+        help="Mark as first release (no previous tag expected)",
+    )
+    parser.add_argument(
+        "--output", type=str, help="Write changelog to file instead of stdout"
+    )
     args = parser.parse_args()
 
     # Determine CalVer date
@@ -472,7 +518,9 @@ def main():
 
     # Generate changelog
     changelog = generate_changelog(
-        commits, tag_name, new_version,
+        commits,
+        tag_name,
+        new_version,
         prev_tag=prev_tag,
         first_release=args.first_release,
     )
@@ -495,12 +543,19 @@ def main():
 
             # Commit version bump
             git("add", str(VERSION_FILE), str(PYPROJECT_FILE))
-            git("commit", "-m", f"chore: bump version to v{new_version} ({calver_date})")
+            git(
+                "commit", "-m", f"chore: bump version to v{new_version} ({calver_date})"
+            )
             print(f"  ✓ Committed version bump")
 
         # Create annotated tag
-        git("tag", "-a", tag_name, "-m",
-            f"Hermes Agent v{new_version} ({calver_date})\n\nWeekly release")
+        git(
+            "tag",
+            "-a",
+            tag_name,
+            "-m",
+            f"Hermes Agent v{new_version} ({calver_date})\n\nWeekly release",
+        )
         print(f"  ✓ Created tag {tag_name}")
 
         # Push
@@ -512,10 +567,18 @@ def main():
         changelog_file.write_text(changelog)
 
         result = subprocess.run(
-            ["gh", "release", "create", tag_name,
-             "--title", f"Hermes Agent v{new_version} ({calver_date})",
-             "--notes-file", str(changelog_file)],
-            capture_output=True, text=True,
+            [
+                "gh",
+                "release",
+                "create",
+                tag_name,
+                "--title",
+                f"Hermes Agent v{new_version} ({calver_date})",
+                "--notes-file",
+                str(changelog_file),
+            ],
+            capture_output=True,
+            text=True,
             cwd=str(REPO_ROOT),
         )
 
@@ -526,7 +589,9 @@ def main():
         else:
             print(f"  ✗ GitHub release failed: {result.stderr}")
             print(f"    Tag was created. Create the release manually:")
-            print(f"    gh release create {tag_name} --title 'Hermes Agent v{new_version} ({calver_date})'")
+            print(
+                f"    gh release create {tag_name} --title 'Hermes Agent v{new_version} ({calver_date})'"
+            )
 
         print(f"\n  🎉 Release v{new_version} ({tag_name}) published!")
     else:
