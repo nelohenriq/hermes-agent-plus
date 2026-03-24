@@ -15,7 +15,7 @@
 param(
     [switch]$NoVenv,
     [switch]$SkipSetup,
-    [string]$Branch = "main",
+    [string]$Branch = "master",
     [string]$HermesHome = "$env:LOCALAPPDATA\hermes",
     [string]$InstallDir = "$env:LOCALAPPDATA\hermes\hermes-agent"
 )
