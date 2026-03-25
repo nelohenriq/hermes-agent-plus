@@ -11,11 +11,63 @@ Methods extracted from run_agent.py AIAgent class in Phase 5.
 import logging
 import os
 import random
+import sys
 import time
 import uuid
 from typing import List, Dict, Any, Optional, Callable
 
 logger = logging.getLogger(__name__)
+
+
+class _SafeWriter:
+    """Transparent stdio wrapper that catches OSError/ValueError from broken pipes.
+
+    When hermes-agent runs as a systemd service, Docker container, or headless
+    daemon, the stdout/stderr pipe can become unavailable. Any print() call then raises
+    ``OSError: [Errno 5] Input/output error``, which can crash agent setup or
+    run_conversation().
+
+    This wrapper delegates all writes to the underlying stream and silently
+    catches both OSError and ValueError. It is transparent when the wrapped
+    stream is healthy.
+    """
+
+    __slots__ = ("_inner",)
+
+    def __init__(self, inner):
+        object.__setattr__(self, "_inner", inner)
+
+    def write(self, data):
+        try:
+            return self._inner.write(data)
+        except (OSError, ValueError):
+            return len(data) if isinstance(data, str) else 0
+
+    def flush(self):
+        try:
+            self._inner.flush()
+        except (OSError, ValueError):
+            pass
+
+    def fileno(self):
+        return self._inner.fileno()
+
+    def isatty(self):
+        try:
+            return self._inner.isatty()
+        except (OSError, ValueError):
+            return False
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _install_safe_stdio() -> None:
+    """Wrap stdout/stderr so best-effort console output cannot crash the agent."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is not None and not isinstance(stream, _SafeWriter):
+            setattr(sys, stream_name, _SafeWriter(stream))
 
 
 class ConversationMixin:
@@ -85,15 +137,19 @@ class ConversationMixin:
 
         # Preserve the original user message (no nudge injection).
         # Honcho should receive the actual user input, not system nudges.
-        original_user_message = persist_user_message if persist_user_message is not None else user_message
+        original_user_message = (
+            persist_user_message if persist_user_message is not None else user_message
+        )
 
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
         # how many tool iterations THIS turn used.
         _should_review_memory = False
-        if (self._memory_nudge_interval > 0
-                and "memory" in self.valid_tool_names
-                and self._memory_store):
+        if (
+            self._memory_nudge_interval > 0
+            and "memory" in self.valid_tool_names
+            and self._memory_store
+        ):
             self._turns_since_memory += 1
             if self._turns_since_memory >= self._memory_nudge_interval:
                 _should_review_memory = True
@@ -108,7 +164,9 @@ class ConversationMixin:
         # to consume background prefetch results from turn N-1.
         self._honcho_context = ""
         self._honcho_turn_context = ""
-        _recall_mode = (self._honcho_config.recall_mode if self._honcho_config else "hybrid")
+        _recall_mode = (
+            self._honcho_config.recall_mode if self._honcho_config else "hybrid"
+        )
         if self._honcho and self._honcho_session_key and _recall_mode != "tools":
             try:
                 prefetched_context = self._honcho_prefetch(original_user_message)
@@ -127,7 +185,9 @@ class ConversationMixin:
         self._persist_user_message_idx = current_turn_user_idx
 
         if not self.quiet_mode:
-            self._safe_print(f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'")
+            self._safe_print(
+                f"💬 Starting conversation: '{user_message[:60]}{'...' if len(user_message) > 60 else ''}'"
+            )
 
         # ── System prompt (cached per session for prefix caching) ──
         # Built once on first call, reused for all subsequent calls.
@@ -166,12 +226,21 @@ class ConversationMixin:
                 # Store the system prompt snapshot in SQLite
                 if self._session_db:
                     try:
-                        self._session_db.update_system_prompt(self.session_id, self._cached_system_prompt)
+                        self._session_db.update_system_prompt(
+                            self.session_id, self._cached_system_prompt
+                        )
                     except Exception as e:
                         logger.debug("Session DB update_system_prompt failed: %s", e)
 
         active_system_prompt = self._cached_system_prompt
-        return messages, active_system_prompt, effective_task_id, current_turn_user_idx, _should_review_memory, original_user_message
+        return (
+            messages,
+            active_system_prompt,
+            effective_task_id,
+            current_turn_user_idx,
+            _should_review_memory,
+            original_user_message,
+        )
 
     def _perform_preflight_compression(
         self,
@@ -196,8 +265,10 @@ class ConversationMixin:
         if (
             self.compression_enabled
             and self.context_compressor
-            and len(messages) > self.context_compressor.protect_first_n
-                                + self.context_compressor.protect_last_n + 1
+            and len(messages)
+            > self.context_compressor.protect_first_n
+            + self.context_compressor.protect_last_n
+            + 1
         ):
             _sys_tok_est = estimate_tokens_rough(active_system_prompt or "")
             _msg_tok_est = estimate_messages_tokens_rough(messages)
@@ -221,7 +292,9 @@ class ConversationMixin:
                 for _pass in range(3):
                     _orig_len = len(messages)
                     messages, active_system_prompt = self._compress_context(
-                        messages, system_message, approx_tokens=_preflight_tokens,
+                        messages,
+                        system_message,
+                        approx_tokens=_preflight_tokens,
                         task_id=effective_task_id,
                     )
                     if len(messages) >= _orig_len:
@@ -233,7 +306,6 @@ class ConversationMixin:
                     if _preflight_tokens < self.context_compressor.threshold_tokens:
                         break  # Under threshold
         return messages, active_system_prompt
-
 
     def _run_conversation_loop(
         self,
@@ -262,7 +334,9 @@ class ConversationMixin:
         # Clear any stale interrupt state at start
         self.clear_interrupt()
 
-        while api_call_count < self.max_iterations and self.iteration_budget.remaining > 0:
+        while (
+            api_call_count < self.max_iterations and self.iteration_budget.remaining > 0
+        ):
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
 
@@ -270,13 +344,17 @@ class ConversationMixin:
             if self._interrupt_requested:
                 interrupted = True
                 if not self.quiet_mode:
-                    self._safe_print(f"\n⚡ Breaking out of tool loop due to interrupt...")
+                    self._safe_print(
+                        f"\n⚡ Breaking out of tool loop due to interrupt..."
+                    )
                 break
-            
+
             api_call_count += 1
             if not self.iteration_budget.consume():
                 if not self.quiet_mode:
-                    self._safe_print(f"\n⚠️  Session iteration budget exhausted ({self.iteration_budget.max_total} total across agent + subagents)")
+                    self._safe_print(
+                        f"\n⚠️  Session iteration budget exhausted ({self.iteration_budget.max_total} total across agent + subagents)"
+                    )
                 break
 
             # Fire step_callback for gateway hooks (agent:step event)
@@ -293,14 +371,20 @@ class ConversationMixin:
                             break
                     self.step_callback(api_call_count, prev_tools)
                 except Exception as _step_err:
-                    logger.debug("step_callback error (iteration %s): %s", api_call_count, _step_err)
+                    logger.debug(
+                        "step_callback error (iteration %s): %s",
+                        api_call_count,
+                        _step_err,
+                    )
 
             # Track tool-calling iterations for skill nudge.
             # Counter resets whenever skill_manage is actually used.
-            if (self._skill_nudge_interval > 0
-                    and "skill_manage" in self.valid_tool_names):
+            if (
+                self._skill_nudge_interval > 0
+                and "skill_manage" in self.valid_tool_names
+            ):
                 self._iters_since_skill += 1
-            
+
             # Prepare messages for API call
             # If we have an ephemeral system prompt, prepend it to the messages
             # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
@@ -310,7 +394,11 @@ class ConversationMixin:
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
-                if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
+                if (
+                    idx == current_turn_user_idx
+                    and msg.get("role") == "user"
+                    and self._honcho_turn_context
+                ):
                     api_msg["content"] = _inject_honcho_turn_context(
                         api_msg.get("content", ""), self._honcho_turn_context
                     )
@@ -346,9 +434,13 @@ class ConversationMixin:
             # so the stable cache prefix remains unchanged.
             effective_system = active_system_prompt or ""
             if self.ephemeral_system_prompt:
-                effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+                effective_system = (
+                    effective_system + "\n\n" + self.ephemeral_system_prompt
+                ).strip()
             if effective_system:
-                api_messages = [{"role": "system", "content": effective_system}] + api_messages
+                api_messages = [
+                    {"role": "system", "content": effective_system}
+                ] + api_messages
 
             # Inject ephemeral prefill messages right after the system prompt
             # but before conversation history. Same API-call-time-only pattern.
@@ -362,7 +454,11 @@ class ConversationMixin:
             # inject cache_control breakpoints (system + last 3 messages) to reduce
             # input token costs by ~75% on multi-turn conversations.
             if self._use_prompt_caching:
-                api_messages = apply_anthropic_cache_control(api_messages, cache_ttl=self._cache_ttl, native_anthropic=(self.api_mode == 'anthropic_messages'))
+                api_messages = apply_anthropic_cache_control(
+                    api_messages,
+                    cache_ttl=self._cache_ttl,
+                    native_anthropic=(self.api_mode == "anthropic_messages"),
+                )
 
             # Safety net: strip orphaned tool results / add stubs for missing
             # results before sending to the API.  Runs unconditionally — not
@@ -373,14 +469,20 @@ class ConversationMixin:
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
             approx_tokens = total_chars // 4  # Rough estimate: 4 chars per token
-            
+
             # Thinking spinner for quiet mode (animated during API call)
             thinking_spinner = None
-            
+
             if not self.quiet_mode:
-                self._vprint(f"\n{self.log_prefix}🔄 Making API call #{api_call_count}/{self.max_iterations}...")
-                self._vprint(f"{self.log_prefix}   📊 Request size: {len(api_messages)} messages, ~{approx_tokens:,} tokens (~{total_chars:,} chars)")
-                self._vprint(f"{self.log_prefix}   🔧 Available tools: {len(self.tools) if self.tools else 0}")
+                self._vprint(
+                    f"\n{self.log_prefix}🔄 Making API call #{api_call_count}/{self.max_iterations}..."
+                )
+                self._vprint(
+                    f"{self.log_prefix}   📊 Request size: {len(api_messages)} messages, ~{approx_tokens:,} tokens (~{total_chars:,} chars)"
+                )
+                self._vprint(
+                    f"{self.log_prefix}   🔧 Available tools: {len(self.tools) if self.tools else 0}"
+                )
             else:
                 # Animated thinking spinner in quiet mode
                 face = random.choice(KawaiiSpinner.KAWAII_THINKING)
@@ -392,16 +494,24 @@ class ConversationMixin:
                 elif not self._has_stream_consumers():
                     # Raw KawaiiSpinner only when no streaming consumers
                     # (would conflict with streamed token output)
-                    spinner_type = random.choice(['brain', 'sparkle', 'pulse', 'moon', 'star'])
-                    thinking_spinner = KawaiiSpinner(f"{face} {verb}...", spinner_type=spinner_type)
+                    spinner_type = random.choice(
+                        ["brain", "sparkle", "pulse", "moon", "star"]
+                    )
+                    thinking_spinner = KawaiiSpinner(
+                        f"{face} {verb}...", spinner_type=spinner_type
+                    )
                     thinking_spinner.start()
-            
+
             # Log request details if verbose
             if self.verbose_logging:
-                logging.debug(f"API Request - Model: {self.model}, Messages: {len(messages)}, Tools: {len(self.tools) if self.tools else 0}")
-                logging.debug(f"Last message role: {messages[-1]['role'] if messages else 'none'}")
+                logging.debug(
+                    f"API Request - Model: {self.model}, Messages: {len(messages)}, Tools: {len(self.tools) if self.tools else 0}"
+                )
+                logging.debug(
+                    f"Last message role: {messages[-1]['role'] if messages else 'none'}"
+                )
                 logging.debug(f"Total message size: ~{approx_tokens:,} tokens")
-            
+
             api_start_time = time.time()
             retry_count = 0
             max_retries = 3
@@ -419,9 +529,16 @@ class ConversationMixin:
                 try:
                     api_kwargs = self._build_api_kwargs(api_messages)
                     if self.api_mode == "codex_responses":
-                        api_kwargs = self._preflight_codex_api_kwargs(api_kwargs, allow_stream=False)
+                        api_kwargs = self._preflight_codex_api_kwargs(
+                            api_kwargs, allow_stream=False
+                        )
 
-                    if os.getenv("HERMES_DUMP_REQUESTS", "").strip().lower() in {"1", "true", "yes", "on"}:
+                    if os.getenv("HERMES_DUMP_REQUESTS", "").strip().lower() in {
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    }:
                         self._dump_api_request_debug(api_kwargs, reason="preflight")
 
                     # Check prompt cache for potential hits before making API call
@@ -449,13 +566,18 @@ class ConversationMixin:
                         else:
                             response = self._interruptible_api_call(api_kwargs)
                         cached_hit = False
-                    
+
                     api_duration = time.time() - api_start_time
 
                     # Record cache statistics if applicable
                     if cached_hit:
                         from agent.token_stats import record_cache_hit
-                        estimated_tokens = self.context_compressor.last_prompt_tokens if hasattr(self, 'context_compressor') else 0
+
+                        estimated_tokens = (
+                            self.context_compressor.last_prompt_tokens
+                            if hasattr(self, "context_compressor")
+                            else 0
+                        )
                         record_cache_hit(self.provider, estimated_tokens, self.model)
 
                     # Stop thinking spinner silently -- the response box or tool
@@ -465,20 +587,30 @@ class ConversationMixin:
                         thinking_spinner = None
                     if self.thinking_callback:
                         self.thinking_callback("")
-                    
+
                     if not self.quiet_mode:
-                        self._vprint(f"{self.log_prefix}⏱️  API call completed in {api_duration:.2f}s")
-                    
+                        self._vprint(
+                            f"{self.log_prefix}⏱️  API call completed in {api_duration:.2f}s"
+                        )
+
                     if self.verbose_logging:
                         # Log response with provider info if available
-                        resp_model = getattr(response, 'model', 'N/A') if response else 'N/A'
-                        logging.debug(f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}")
-                    
+                        resp_model = (
+                            getattr(response, "model", "N/A") if response else "N/A"
+                        )
+                        logging.debug(
+                            f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}"
+                        )
+
                     # Validate response shape before proceeding
                     response_invalid = False
                     error_details = []
                     if self.api_mode == "codex_responses":
-                        output_items = getattr(response, "output", None) if response is not None else None
+                        output_items = (
+                            getattr(response, "output", None)
+                            if response is not None
+                            else None
+                        )
                         if response is None:
                             response_invalid = True
                             error_details.append("response is None")
@@ -489,7 +621,11 @@ class ConversationMixin:
                             response_invalid = True
                             error_details.append("response.output is empty")
                     elif self.api_mode == "anthropic_messages":
-                        content_blocks = getattr(response, "content", None) if response is not None else None
+                        content_blocks = (
+                            getattr(response, "content", None)
+                            if response is not None
+                            else None
+                        )
                         if response is None:
                             response_invalid = True
                             error_details.append("response is None")
@@ -500,12 +636,19 @@ class ConversationMixin:
                             response_invalid = True
                             error_details.append("response.content is empty")
                     else:
-                        if response is None or not hasattr(response, 'choices') or response.choices is None or len(response.choices) == 0:
+                        if (
+                            response is None
+                            or not hasattr(response, "choices")
+                            or response.choices is None
+                            or len(response.choices) == 0
+                        ):
                             response_invalid = True
                             if response is None:
                                 error_details.append("response is None")
-                            elif not hasattr(response, 'choices'):
-                                error_details.append("response has no 'choices' attribute")
+                            elif not hasattr(response, "choices"):
+                                error_details.append(
+                                    "response has no 'choices' attribute"
+                                )
                             elif response.choices is None:
                                 error_details.append("response.choices is None")
                             else:
@@ -518,70 +661,120 @@ class ConversationMixin:
                             thinking_spinner = None
                         if self.thinking_callback:
                             self.thinking_callback("")
-                        
+
                         # This is often rate limiting or provider returning malformed response
                         retry_count += 1
-                        
+
                         # Eager fallback: empty/malformed responses are a common
                         # rate-limit symptom.  Switch to fallback immediately
                         # rather than retrying with extended backoff.
-                        if not self._fallback_activated and self._try_activate_fallback():
+                        if (
+                            not self._fallback_activated
+                            and self._try_activate_fallback()
+                        ):
                             retry_count = 0
                             continue
 
                         # Check for error field in response (some providers include this)
                         error_msg = "Unknown"
                         provider_name = "Unknown"
-                        if response and hasattr(response, 'error') and response.error:
+                        if response and hasattr(response, "error") and response.error:
                             error_msg = str(response.error)
                             # Try to extract provider from error metadata
-                            if hasattr(response.error, 'metadata') and response.error.metadata:
-                                provider_name = response.error.metadata.get('provider_name', 'Unknown')
-                        elif response and hasattr(response, 'message') and response.message:
+                            if (
+                                hasattr(response.error, "metadata")
+                                and response.error.metadata
+                            ):
+                                provider_name = response.error.metadata.get(
+                                    "provider_name", "Unknown"
+                                )
+                        elif (
+                            response
+                            and hasattr(response, "message")
+                            and response.message
+                        ):
                             error_msg = str(response.message)
-                        
+
                         # Try to get provider from model field (OpenRouter often returns actual model used)
-                        if provider_name == "Unknown" and response and hasattr(response, 'model') and response.model:
+                        if (
+                            provider_name == "Unknown"
+                            and response
+                            and hasattr(response, "model")
+                            and response.model
+                        ):
                             provider_name = f"model={response.model}"
-                        
+
                         # Check for x-openrouter-provider or similar metadata
                         if provider_name == "Unknown" and response:
                             # Log all response attributes for debugging
-                            resp_attrs = {k: str(v)[:100] for k, v in vars(response).items() if not k.startswith('_')}
+                            resp_attrs = {
+                                k: str(v)[:100]
+                                for k, v in vars(response).items()
+                                if not k.startswith("_")
+                            }
                             if self.verbose_logging:
-                                logging.debug(f"Response attributes for invalid response: {resp_attrs}")
-                        
-                        self._vprint(f"{self.log_prefix}⚠️  Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}", force=True)
-                        self._vprint(f"{self.log_prefix}   🏢 Provider: {provider_name}", force=True)
-                        self._vprint(f"{self.log_prefix}   📝 Provider message: {error_msg[:200]}", force=True)
-                        self._vprint(f"{self.log_prefix}   ⏱️  Response time: {api_duration:.2f}s (fast response often indicates rate limiting)", force=True)
-                        
+                                logging.debug(
+                                    f"Response attributes for invalid response: {resp_attrs}"
+                                )
+
+                        self._vprint(
+                            f"{self.log_prefix}⚠️  Invalid API response (attempt {retry_count}/{max_retries}): {', '.join(error_details)}",
+                            force=True,
+                        )
+                        self._vprint(
+                            f"{self.log_prefix}   🏢 Provider: {provider_name}",
+                            force=True,
+                        )
+                        self._vprint(
+                            f"{self.log_prefix}   📝 Provider message: {error_msg[:200]}",
+                            force=True,
+                        )
+                        self._vprint(
+                            f"{self.log_prefix}   ⏱️  Response time: {api_duration:.2f}s (fast response often indicates rate limiting)",
+                            force=True,
+                        )
+
                         if retry_count >= max_retries:
                             # Try fallback before giving up
                             if self._try_activate_fallback():
                                 retry_count = 0
                                 continue
-                            self._vprint(f"{self.log_prefix}❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.", force=True)
-                            logging.error(f"{self.log_prefix}Invalid API response after {max_retries} retries.")
+                            self._vprint(
+                                f"{self.log_prefix}❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.",
+                                force=True,
+                            )
+                            logging.error(
+                                f"{self.log_prefix}Invalid API response after {max_retries} retries."
+                            )
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": "Invalid API response shape. Likely rate limited or malformed provider response.",
-                                "failed": True  # Mark as failure for filtering
+                                "failed": True,  # Mark as failure for filtering
                             }
-                        
+
                         # Longer backoff for rate limiting (likely cause of None choices)
-                        wait_time = min(5 * (2 ** (retry_count - 1)), 120)  # 5s, 10s, 20s, 40s, 80s, 120s
-                        self._vprint(f"{self.log_prefix}⏳ Retrying in {wait_time}s (extended backoff for possible rate limit)...", force=True)
-                        logging.warning(f"Invalid API response (retry {retry_count}/{max_retries}): {', '.join(error_details)} | Provider: {provider_name}")
-                        
+                        wait_time = min(
+                            5 * (2 ** (retry_count - 1)), 120
+                        )  # 5s, 10s, 20s, 40s, 80s, 120s
+                        self._vprint(
+                            f"{self.log_prefix}⏳ Retrying in {wait_time}s (extended backoff for possible rate limit)...",
+                            force=True,
+                        )
+                        logging.warning(
+                            f"Invalid API response (retry {retry_count}/{max_retries}): {', '.join(error_details)} | Provider: {provider_name}"
+                        )
+
                         # Sleep in small increments to stay responsive to interrupts
                         sleep_end = time.time() + wait_time
                         while time.time() < sleep_end:
                             if self._interrupt_requested:
-                                self._vprint(f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                                self._vprint(
+                                    f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.",
+                                    force=True,
+                                )
                                 self._persist_session(messages, conversation_history)
                                 self.clear_interrupt()
                                 return {
@@ -597,33 +790,54 @@ class ConversationMixin:
                     # Check finish_reason before proceeding
                     if self.api_mode == "codex_responses":
                         status = getattr(response, "status", None)
-                        incomplete_details = getattr(response, "incomplete_details", None)
+                        incomplete_details = getattr(
+                            response, "incomplete_details", None
+                        )
                         incomplete_reason = None
                         if isinstance(incomplete_details, dict):
                             incomplete_reason = incomplete_details.get("reason")
                         else:
-                            incomplete_reason = getattr(incomplete_details, "reason", None)
-                        if status == "incomplete" and incomplete_reason in {"max_output_tokens", "length"}:
+                            incomplete_reason = getattr(
+                                incomplete_details, "reason", None
+                            )
+                        if status == "incomplete" and incomplete_reason in {
+                            "max_output_tokens",
+                            "length",
+                        }:
                             finish_reason = "length"
                         else:
                             finish_reason = "stop"
                     elif self.api_mode == "anthropic_messages":
-                        stop_reason_map = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length", "stop_sequence": "stop"}
-                        finish_reason = stop_reason_map.get(response.stop_reason, "stop")
+                        stop_reason_map = {
+                            "end_turn": "stop",
+                            "tool_use": "tool_calls",
+                            "max_tokens": "length",
+                            "stop_sequence": "stop",
+                        }
+                        finish_reason = stop_reason_map.get(
+                            response.stop_reason, "stop"
+                        )
                     else:
                         finish_reason = response.choices[0].finish_reason
 
                     if finish_reason == "length":
-                        self._vprint(f"{self.log_prefix}⚠️  Response truncated (finish_reason='length') - model hit max output tokens", force=True)
+                        self._vprint(
+                            f"{self.log_prefix}⚠️  Response truncated (finish_reason='length') - model hit max output tokens",
+                            force=True,
+                        )
 
                         if self.api_mode == "chat_completions":
                             assistant_message = response.choices[0].message
                             if not assistant_message.tool_calls:
                                 length_continue_retries += 1
-                                interim_msg = self._build_assistant_message(assistant_message, finish_reason)
+                                interim_msg = self._build_assistant_message(
+                                    assistant_message, finish_reason
+                                )
                                 messages.append(interim_msg)
                                 if assistant_message.content:
-                                    truncated_response_prefix += assistant_message.content
+                                    truncated_response_prefix += (
+                                        assistant_message.content
+                                    )
 
                                 if length_continue_retries < 3:
                                     self._vprint(
@@ -644,7 +858,9 @@ class ConversationMixin:
                                     restart_with_length_continuation = True
                                     break
 
-                                partial_response = self._strip_think_blocks(truncated_response_prefix).strip()
+                                partial_response = self._strip_think_blocks(
+                                    truncated_response_prefix
+                                ).strip()
                                 self._cleanup_task_resources(effective_task_id)
                                 self._persist_session(messages, conversation_history)
                                 return {
@@ -658,8 +874,12 @@ class ConversationMixin:
 
                         # If we have prior messages, roll back to last complete state
                         if len(messages) > 1:
-                            self._vprint(f"{self.log_prefix}   ⏪ Rolling back to last complete assistant turn")
-                            rolled_back_messages = self._get_messages_up_to_last_assistant(messages)
+                            self._vprint(
+                                f"{self.log_prefix}   ⏪ Rolling back to last complete assistant turn"
+                            )
+                            rolled_back_messages = (
+                                self._get_messages_up_to_last_assistant(messages)
+                            )
 
                             self._cleanup_task_resources(effective_task_id)
                             self._persist_session(messages, conversation_history)
@@ -670,11 +890,14 @@ class ConversationMixin:
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
-                                "error": "Response truncated due to output length limit"
+                                "error": "Response truncated due to output length limit",
                             }
                         else:
                             # First message was truncated - mark as failed
-                            self._vprint(f"{self.log_prefix}❌ First response truncated - cannot recover", force=True)
+                            self._vprint(
+                                f"{self.log_prefix}❌ First response truncated - cannot recover",
+                                force=True,
+                            )
                             self._persist_session(messages, conversation_history)
                             return {
                                 "final_response": None,
@@ -682,11 +905,11 @@ class ConversationMixin:
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "failed": True,
-                                "error": "First response truncated due to output length limit"
+                                "error": "First response truncated due to output length limit",
                             }
-                    
+
                     # Track actual token usage from response for context management
-                    if hasattr(response, 'usage') and response.usage:
+                    if hasattr(response, "usage") and response.usage:
                         canonical_usage = normalize_usage(
                             response.usage,
                             provider=self.provider,
@@ -706,7 +929,9 @@ class ConversationMixin:
                         if self.context_compressor._context_probed:
                             ctx = self.context_compressor.context_length
                             save_context_length(self.model, self.base_url, ctx)
-                            self._safe_print(f"{self.log_prefix}💾 Cached context length: {ctx:,} tokens for {self.model}")
+                            self._safe_print(
+                                f"{self.log_prefix}💾 Cached context length: {ctx:,} tokens for {self.model}"
+                            )
                             self.context_compressor._context_probed = False
 
                         self.session_prompt_tokens += prompt_tokens
@@ -715,9 +940,15 @@ class ConversationMixin:
                         self.session_api_calls += 1
                         self.session_input_tokens += canonical_usage.input_tokens
                         self.session_output_tokens += canonical_usage.output_tokens
-                        self.session_cache_read_tokens += canonical_usage.cache_read_tokens
-                        self.session_cache_write_tokens += canonical_usage.cache_write_tokens
-                        self.session_reasoning_tokens += canonical_usage.reasoning_tokens
+                        self.session_cache_read_tokens += (
+                            canonical_usage.cache_read_tokens
+                        )
+                        self.session_cache_write_tokens += (
+                            canonical_usage.cache_write_tokens
+                        )
+                        self.session_reasoning_tokens += (
+                            canonical_usage.reasoning_tokens
+                        )
 
                         cost_result = estimate_usage_cost(
                             self.model,
@@ -727,7 +958,9 @@ class ConversationMixin:
                             api_key=getattr(self, "api_key", ""),
                         )
                         if cost_result.amount_usd is not None:
-                            self.session_estimated_cost_usd += float(cost_result.amount_usd)
+                            self.session_estimated_cost_usd += float(
+                                cost_result.amount_usd
+                            )
                         self.session_cost_status = cost_result.status
                         self.session_cost_source = cost_result.source
 
@@ -735,8 +968,11 @@ class ConversationMixin:
                         # Gateway sessions persist via session_store.update_session()
                         # after run_conversation returns, so only persist here for
                         # CLI (and other non-gateway) platforms to avoid double-counting.
-                        if (self._session_db and self.session_id
-                                and getattr(self, 'platform', None) == 'cli'):
+                        if (
+                            self._session_db
+                            and self.session_id
+                            and getattr(self, "platform", None) == "cli"
+                        ):
                             try:
                                 self._session_db.update_token_counts(
                                     self.session_id,
@@ -745,38 +981,68 @@ class ConversationMixin:
                                     cache_read_tokens=canonical_usage.cache_read_tokens,
                                     cache_write_tokens=canonical_usage.cache_write_tokens,
                                     reasoning_tokens=canonical_usage.reasoning_tokens,
-                                    estimated_cost_usd=float(cost_result.amount_usd)
-                                    if cost_result.amount_usd is not None else None,
+                                    estimated_cost_usd=(
+                                        float(cost_result.amount_usd)
+                                        if cost_result.amount_usd is not None
+                                        else None
+                                    ),
                                     cost_status=cost_result.status,
                                     cost_source=cost_result.source,
                                     billing_provider=self.provider,
                                     billing_base_url=self.base_url,
-                                    billing_mode="subscription_included"
-                                    if cost_result.status == "included" else None,
+                                    billing_mode=(
+                                        "subscription_included"
+                                        if cost_result.status == "included"
+                                        else None
+                                    ),
                                     model=self.model,
                                 )
                             except Exception:
                                 pass  # never block the agent loop
-                        
+
                         if self.verbose_logging:
-                            logging.debug(f"Token usage: prompt={usage_dict['prompt_tokens']:,}, completion={usage_dict['completion_tokens']:,}, total={usage_dict['total_tokens']:,}")
-                        
+                            logging.debug(
+                                f"Token usage: prompt={usage_dict['prompt_tokens']:,}, completion={usage_dict['completion_tokens']:,}, total={usage_dict['total_tokens']:,}"
+                            )
+
                         # Log cache hit stats when prompt caching is active
                         if self._use_prompt_caching:
                             if self.api_mode == "anthropic_messages":
                                 # Anthropic uses cache_read_input_tokens / cache_creation_input_tokens
-                                cached = getattr(response.usage, 'cache_read_input_tokens', 0) or 0
-                                written = getattr(response.usage, 'cache_creation_input_tokens', 0) or 0
+                                cached = (
+                                    getattr(
+                                        response.usage, "cache_read_input_tokens", 0
+                                    )
+                                    or 0
+                                )
+                                written = (
+                                    getattr(
+                                        response.usage, "cache_creation_input_tokens", 0
+                                    )
+                                    or 0
+                                )
                             else:
                                 # OpenRouter uses prompt_tokens_details.cached_tokens
-                                details = getattr(response.usage, 'prompt_tokens_details', None)
-                                cached = getattr(details, 'cached_tokens', 0) or 0 if details else 0
-                                written = getattr(details, 'cache_write_tokens', 0) or 0 if details else 0
+                                details = getattr(
+                                    response.usage, "prompt_tokens_details", None
+                                )
+                                cached = (
+                                    getattr(details, "cached_tokens", 0) or 0
+                                    if details
+                                    else 0
+                                )
+                                written = (
+                                    getattr(details, "cache_write_tokens", 0) or 0
+                                    if details
+                                    else 0
+                                )
                             prompt = usage_dict["prompt_tokens"]
                             hit_pct = (cached / prompt * 100) if prompt > 0 else 0
                             if not self.quiet_mode:
-                                self._vprint(f"{self.log_prefix}   💾 Cache: {cached:,}/{prompt:,} tokens ({hit_pct:.0f}% hit, {written:,} written)")
-                    
+                                self._vprint(
+                                    f"{self.log_prefix}   💾 Cache: {cached:,}/{prompt:,} tokens ({hit_pct:.0f}% hit, {written:,} written)"
+                                )
+
                     break  # Success, exit retry loop
 
                 except InterruptedError:
@@ -786,7 +1052,9 @@ class ConversationMixin:
                     if self.thinking_callback:
                         self.thinking_callback("")
                     api_elapsed = time.time() - api_start_time
-                    self._vprint(f"{self.log_prefix}⚡ Interrupted during API call.", force=True)
+                    self._vprint(
+                        f"{self.log_prefix}⚡ Interrupted during API call.", force=True
+                    )
                     self._persist_session(messages, conversation_history)
                     interrupted = True
                     final_response = f"Operation interrupted: waiting for model response ({api_elapsed:.1f}s elapsed)."
@@ -809,7 +1077,9 @@ class ConversationMixin:
                     ):
                         codex_auth_retry_attempted = True
                         if self._try_refresh_codex_client_credentials(force=True):
-                            self._vprint(f"{self.log_prefix}🔐 Codex auth refreshed after 401. Retrying request...")
+                            self._vprint(
+                                f"{self.log_prefix}🔐 Codex auth refreshed after 401. Retrying request..."
+                            )
                             continue
                     if (
                         self.api_mode == "chat_completions"
@@ -819,36 +1089,63 @@ class ConversationMixin:
                     ):
                         nous_auth_retry_attempted = True
                         if self._try_refresh_nous_client_credentials(force=True):
-                            print(f"{self.log_prefix}🔐 Nous agent key refreshed after 401. Retrying request...")
+                            print(
+                                f"{self.log_prefix}🔐 Nous agent key refreshed after 401. Retrying request..."
+                            )
                             continue
                     if (
                         self.api_mode == "anthropic_messages"
                         and status_code == 401
-                        and hasattr(self, '_anthropic_api_key')
+                        and hasattr(self, "_anthropic_api_key")
                         and not anthropic_auth_retry_attempted
                     ):
                         anthropic_auth_retry_attempted = True
                         from agent.anthropic_adapter import _is_oauth_token
+
                         if self._try_refresh_anthropic_client_credentials():
-                            print(f"{self.log_prefix}🔐 Anthropic credentials refreshed after 401. Retrying request...")
+                            print(
+                                f"{self.log_prefix}🔐 Anthropic credentials refreshed after 401. Retrying request..."
+                            )
                             continue
                         # Credential refresh didn't help — show diagnostic info
                         key = self._anthropic_api_key
-                        auth_method = "Bearer (OAuth/setup-token)" if _is_oauth_token(key) else "x-api-key (API key)"
-                        print(f"{self.log_prefix}🔐 Anthropic 401 — authentication failed.")
+                        auth_method = (
+                            "Bearer (OAuth/setup-token)"
+                            if _is_oauth_token(key)
+                            else "x-api-key (API key)"
+                        )
+                        print(
+                            f"{self.log_prefix}🔐 Anthropic 401 — authentication failed."
+                        )
                         print(f"{self.log_prefix}   Auth method: {auth_method}")
-                        print(f"{self.log_prefix}   Token prefix: {key[:12]}..." if key and len(key) > 12 else f"{self.log_prefix}   Token: (empty or short)")
+                        print(
+                            f"{self.log_prefix}   Token prefix: {key[:12]}..."
+                            if key and len(key) > 12
+                            else f"{self.log_prefix}   Token: (empty or short)"
+                        )
                         print(f"{self.log_prefix}   Troubleshooting:")
-                        print(f"{self.log_prefix}     • Check ANTHROPIC_TOKEN in ~/.hermes/.env for Hermes-managed OAuth/setup tokens")
-                        print(f"{self.log_prefix}     • Check ANTHROPIC_API_KEY in ~/.hermes/.env for API keys or legacy token values")
-                        print(f"{self.log_prefix}     • For API keys: verify at https://console.anthropic.com/settings/keys")
-                        print(f"{self.log_prefix}     • For Claude Code: run 'claude /login' to refresh, then retry")
-                        print(f"{self.log_prefix}     • Clear stale keys: hermes config set ANTHROPIC_TOKEN \"\"")
-                        print(f"{self.log_prefix}     • Legacy cleanup: hermes config set ANTHROPIC_API_KEY \"\"")
+                        print(
+                            f"{self.log_prefix}     • Check ANTHROPIC_TOKEN in ~/.hermes/.env for Hermes-managed OAuth/setup tokens"
+                        )
+                        print(
+                            f"{self.log_prefix}     • Check ANTHROPIC_API_KEY in ~/.hermes/.env for API keys or legacy token values"
+                        )
+                        print(
+                            f"{self.log_prefix}     • For API keys: verify at https://console.anthropic.com/settings/keys"
+                        )
+                        print(
+                            f"{self.log_prefix}     • For Claude Code: run 'claude /login' to refresh, then retry"
+                        )
+                        print(
+                            f'{self.log_prefix}     • Clear stale keys: hermes config set ANTHROPIC_TOKEN ""'
+                        )
+                        print(
+                            f'{self.log_prefix}     • Legacy cleanup: hermes config set ANTHROPIC_API_KEY ""'
+                        )
 
                     retry_count += 1
                     elapsed_time = time.time() - api_start_time
-                    
+
                     # Enhanced error logging
                     error_type = type(api_error).__name__
                     error_msg = str(api_error).lower()
@@ -864,15 +1161,31 @@ class ConversationMixin:
                     _provider = getattr(self, "provider", "unknown")
                     _base = getattr(self, "base_url", "unknown")
                     _model = getattr(self, "model", "unknown")
-                    self._vprint(f"{self.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}", force=True)
-                    self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
-                    self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
-                    self._vprint(f"{self.log_prefix}   📝 Error: {str(api_error)[:200]}", force=True)
-                    self._vprint(f"{self.log_prefix}   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
-                    
+                    self._vprint(
+                        f"{self.log_prefix}⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}",
+                        force=True,
+                    )
+                    self._vprint(
+                        f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}",
+                        force=True,
+                    )
+                    self._vprint(
+                        f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True
+                    )
+                    self._vprint(
+                        f"{self.log_prefix}   📝 Error: {str(api_error)[:200]}",
+                        force=True,
+                    )
+                    self._vprint(
+                        f"{self.log_prefix}   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens"
+                    )
+
                     # Check for interrupt before deciding to retry
                     if self._interrupt_requested:
-                        self._vprint(f"{self.log_prefix}⚡ Interrupt detected during error handling, aborting retries.", force=True)
+                        self._vprint(
+                            f"{self.log_prefix}⚡ Interrupt detected during error handling, aborting retries.",
+                            force=True,
+                        )
                         self._persist_session(messages, conversation_history)
                         self.clear_interrupt()
                         return {
@@ -882,7 +1195,7 @@ class ConversationMixin:
                             "completed": False,
                             "interrupted": True,
                         }
-                    
+
                     # Check for 413 payload-too-large BEFORE generic 4xx handler.
                     # A 413 is a payload-size error — the correct response is to
                     # compress history and retry, not abort immediately.
@@ -907,64 +1220,90 @@ class ConversationMixin:
 
                     is_payload_too_large = (
                         status_code == 413
-                        or 'request entity too large' in error_msg
-                        or 'payload too large' in error_msg
-                        or 'error code: 413' in error_msg
+                        or "request entity too large" in error_msg
+                        or "payload too large" in error_msg
+                        or "error code: 413" in error_msg
                     )
 
                     if is_payload_too_large:
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
-                            self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached for payload-too-large error.", force=True)
-                            logging.error(f"{self.log_prefix}413 compression failed after {max_compression_attempts} attempts.")
+                            self._vprint(
+                                f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached for payload-too-large error.",
+                                force=True,
+                            )
+                            logging.error(
+                                f"{self.log_prefix}413 compression failed after {max_compression_attempts} attempts."
+                            )
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": f"Request payload too large: max compression attempts ({max_compression_attempts}) reached.",
-                                "partial": True
+                                "partial": True,
                             }
                         if not self.context_compressor:
-                            logger.warning("Context compressor not available, cannot compress for 413 error")
+                            logger.warning(
+                                "Context compressor not available, cannot compress for 413 error"
+                            )
                             break
 
-                        self._vprint(f"{self.log_prefix}⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
+                        self._vprint(
+                            f"{self.log_prefix}⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}..."
+                        )
 
                         original_len = len(messages)
                         messages, active_system_prompt = self._compress_context(
-                            messages, system_message, approx_tokens=approx_tokens,
+                            messages,
+                            system_message,
+                            approx_tokens=approx_tokens,
                             task_id=effective_task_id,
                         )
 
                         if len(messages) < original_len:
-                            self._vprint(f"{self.log_prefix}   🗜️  Compressed {original_len} → {len(messages)} messages, retrying...")
+                            self._vprint(
+                                f"{self.log_prefix}   🗜️  Compressed {original_len} → {len(messages)} messages, retrying..."
+                            )
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
                         else:
-                            self._vprint(f"{self.log_prefix}❌ Payload too large and cannot compress further.", force=True)
-                            logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
+                            self._vprint(
+                                f"{self.log_prefix}❌ Payload too large and cannot compress further.",
+                                force=True,
+                            )
+                            logging.error(
+                                f"{self.log_prefix}413 payload too large. Cannot compress further."
+                            )
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": "Request payload too large (413). Cannot compress further.",
-                                "partial": True
+                                "partial": True,
                             }
 
                     # Check for context-length errors BEFORE generic 4xx handler.
                     # Local backends (LM Studio, Ollama, llama.cpp) often return
                     # HTTP 400 with messages like "Context size has been exceeded"
                     # which must trigger compression, not an immediate abort.
-                    is_context_length_error = any(phrase in error_msg for phrase in [
-                        'context length', 'context size', 'maximum context',
-                        'token limit', 'too many tokens', 'reduce the length',
-                        'exceeds the limit', 'context window',
-                        'request entity too large',  # OpenRouter/Nous 413 safety net
-                        'prompt is too long',  # Anthropic: "prompt is too long: N tokens > M maximum"
-                    ])
+                    is_context_length_error = any(
+                        phrase in error_msg
+                        for phrase in [
+                            "context length",
+                            "context size",
+                            "maximum context",
+                            "token limit",
+                            "too many tokens",
+                            "reduce the length",
+                            "exceeds the limit",
+                            "context window",
+                            "request entity too large",  # OpenRouter/Nous 413 safety net
+                            "prompt is too long",  # Anthropic: "prompt is too long: N tokens > M maximum"
+                        ]
+                    )
 
                     # Fallback heuristic: Anthropic sometimes returns a generic
                     # 400 invalid_request_error with just "Error" as the message
@@ -975,9 +1314,17 @@ class ConversationMixin:
                     # each failed message gets persisted, making the session even
                     # larger. (#1630)
                     if not is_context_length_error and status_code == 400:
-                        ctx_len = getattr(getattr(self, 'context_compressor', None), 'context_length', 200000)
-                        is_large_session = approx_tokens > ctx_len * 0.4 or len(api_messages) > 80
-                        is_generic_error = len(error_msg.strip()) < 30  # e.g. just "error"
+                        ctx_len = getattr(
+                            getattr(self, "context_compressor", None),
+                            "context_length",
+                            200000,
+                        )
+                        is_large_session = (
+                            approx_tokens > ctx_len * 0.4 or len(api_messages) > 80
+                        )
+                        is_generic_error = (
+                            len(error_msg.strip()) < 30
+                        )  # e.g. just "error"
                         if is_large_session and is_generic_error:
                             is_context_length_error = True
                             self._vprint(
@@ -986,7 +1333,7 @@ class ConversationMixin:
                                 f"treating as probable context overflow.",
                                 force=True,
                             )
-                    
+
                     if is_context_length_error:
                         compressor = self.context_compressor
                         old_ctx = compressor.context_length
@@ -995,61 +1342,97 @@ class ConversationMixin:
                         parsed_limit = parse_context_limit_from_error(error_msg)
                         if parsed_limit and parsed_limit < old_ctx:
                             new_ctx = parsed_limit
-                            self._vprint(f"{self.log_prefix}⚠️  Context limit detected from API: {new_ctx:,} tokens (was {old_ctx:,})", force=True)
+                            self._vprint(
+                                f"{self.log_prefix}⚠️  Context limit detected from API: {new_ctx:,} tokens (was {old_ctx:,})",
+                                force=True,
+                            )
                         else:
                             # Step down to the next probe tier
                             new_ctx = get_next_probe_tier(old_ctx)
 
                         if new_ctx and new_ctx < old_ctx:
                             compressor.context_length = new_ctx
-                            compressor.threshold_tokens = int(new_ctx * compressor.threshold_percent)
+                            compressor.threshold_tokens = int(
+                                new_ctx * compressor.threshold_percent
+                            )
                             compressor._context_probed = True
-                            self._vprint(f"{self.log_prefix}⚠️  Context length exceeded — stepping down: {old_ctx:,} → {new_ctx:,} tokens", force=True)
+                            self._vprint(
+                                f"{self.log_prefix}⚠️  Context length exceeded — stepping down: {old_ctx:,} → {new_ctx:,} tokens",
+                                force=True,
+                            )
                         else:
-                            self._vprint(f"{self.log_prefix}⚠️  Context length exceeded at minimum tier — attempting compression...", force=True)
+                            self._vprint(
+                                f"{self.log_prefix}⚠️  Context length exceeded at minimum tier — attempting compression...",
+                                force=True,
+                            )
 
                         compression_attempts += 1
                         if compression_attempts > max_compression_attempts:
-                            self._vprint(f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.", force=True)
-                            logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
+                            self._vprint(
+                                f"{self.log_prefix}❌ Max compression attempts ({max_compression_attempts}) reached.",
+                                force=True,
+                            )
+                            logging.error(
+                                f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts."
+                            )
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached.",
-                                "partial": True
+                                "partial": True,
                             }
                         if not self.context_compressor:
-                            logger.warning("Context compressor not available, cannot compress for context length error")
+                            logger.warning(
+                                "Context compressor not available, cannot compress for context length error"
+                            )
                             break
 
-                        self._vprint(f"{self.log_prefix}   🗜️  Context compression attempt {compression_attempts}/{max_compression_attempts}...")
+                        self._vprint(
+                            f"{self.log_prefix}   🗜️  Context compression attempt {compression_attempts}/{max_compression_attempts}..."
+                        )
 
                         original_len = len(messages)
                         messages, active_system_prompt = self._compress_context(
-                            messages, system_message, approx_tokens=approx_tokens,
+                            messages,
+                            system_message,
+                            approx_tokens=approx_tokens,
                             task_id=effective_task_id,
                         )
 
-                        if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
+                        if (
+                            len(messages) < original_len
+                            or new_ctx
+                            and new_ctx < old_ctx
+                        ):
                             if len(messages) < original_len:
-                                self._vprint(f"{self.log_prefix}   🗜️  Compressed {original_len} → {len(messages)} messages, retrying...")
+                                self._vprint(
+                                    f"{self.log_prefix}   🗜️  Compressed {original_len} → {len(messages)} messages, retrying..."
+                                )
                             time.sleep(2)  # Brief pause between compression retries
                             restart_with_compressed_messages = True
                             break
                         else:
                             # Can't compress further and already at minimum tier
-                            self._vprint(f"{self.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
-                            self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content.", force=True)
-                            logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
+                            self._vprint(
+                                f"{self.log_prefix}❌ Context length exceeded and cannot compress further.",
+                                force=True,
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}   💡 The conversation has accumulated too much content.",
+                                force=True,
+                            )
+                            logging.error(
+                                f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further."
+                            )
                             self._persist_session(messages, conversation_history)
                             return {
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
-                                "partial": True
+                                "partial": True,
                             }
 
                     # Check for non-retryable client errors (4xx HTTP status codes).
@@ -1061,21 +1444,50 @@ class ConversationMixin:
                     # Also catch local validation errors (ValueError, TypeError) — these
                     # are programming bugs, not transient failures.
                     _RETRYABLE_STATUS_CODES = {413, 429, 529}
-                    is_local_validation_error = isinstance(api_error, (ValueError, TypeError))
+                    is_local_validation_error = isinstance(
+                        api_error, (ValueError, TypeError)
+                    )
                     # Detect generic 400s from Anthropic OAuth (transient server-side failures).
                     # Real invalid_request_error responses include a descriptive message;
                     # transient ones contain only "Error" or are empty. (ref: issue #1608)
                     _err_body = getattr(api_error, "body", None) or {}
-                    _err_message = (_err_body.get("error", {}).get("message", "") if isinstance(_err_body, dict) else "")
-                    _is_generic_400 = (status_code == 400 and _err_message.strip().lower() in ("error", ""))
-                    is_client_status_error = isinstance(status_code, int) and 400 <= status_code < 500 and status_code not in _RETRYABLE_STATUS_CODES and not _is_generic_400
-                    is_client_error = (is_local_validation_error or is_client_status_error or any(phrase in error_msg for phrase in [
-                        'error code: 401', 'error code: 403',
-                        'error code: 404', 'error code: 422',
-                        'is not a valid model', 'invalid model', 'model not found',
-                        'invalid api key', 'invalid_api_key', 'authentication',
-                        'unauthorized', 'forbidden', 'not found',
-                    ])) and not is_context_length_error
+                    _err_message = (
+                        _err_body.get("error", {}).get("message", "")
+                        if isinstance(_err_body, dict)
+                        else ""
+                    )
+                    _is_generic_400 = (
+                        status_code == 400
+                        and _err_message.strip().lower() in ("error", "")
+                    )
+                    is_client_status_error = (
+                        isinstance(status_code, int)
+                        and 400 <= status_code < 500
+                        and status_code not in _RETRYABLE_STATUS_CODES
+                        and not _is_generic_400
+                    )
+                    is_client_error = (
+                        is_local_validation_error
+                        or is_client_status_error
+                        or any(
+                            phrase in error_msg
+                            for phrase in [
+                                "error code: 401",
+                                "error code: 403",
+                                "error code: 404",
+                                "error code: 422",
+                                "is not a valid model",
+                                "invalid model",
+                                "model not found",
+                                "invalid api key",
+                                "invalid_api_key",
+                                "authentication",
+                                "unauthorized",
+                                "forbidden",
+                                "not found",
+                            ]
+                        )
+                    ) and not is_context_length_error
 
                     if is_client_error:
                         # Try fallback before aborting — a different provider
@@ -1084,27 +1496,61 @@ class ConversationMixin:
                             retry_count = 0
                             continue
                         self._dump_api_request_debug(
-                            api_kwargs, reason="non_retryable_client_error", error=api_error,
+                            api_kwargs,
+                            reason="non_retryable_client_error",
+                            error=api_error,
                         )
-                        self._vprint(f"{self.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
-                        self._vprint(f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}", force=True)
-                        self._vprint(f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True)
+                        self._vprint(
+                            f"{self.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.",
+                            force=True,
+                        )
+                        self._vprint(
+                            f"{self.log_prefix}   🔌 Provider: {_provider}  Model: {_model}",
+                            force=True,
+                        )
+                        self._vprint(
+                            f"{self.log_prefix}   🌐 Endpoint: {_base}", force=True
+                        )
                         # Actionable guidance for common auth errors
-                        if status_code in (401, 403) or "unauthorized" in error_msg or "forbidden" in error_msg or "permission" in error_msg:
-                            self._vprint(f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:", force=True)
-                            self._vprint(f"{self.log_prefix}      • Is the key valid? Run: hermes setup", force=True)
-                            self._vprint(f"{self.log_prefix}      • Does your account have access to {_model}?", force=True)
+                        if (
+                            status_code in (401, 403)
+                            or "unauthorized" in error_msg
+                            or "forbidden" in error_msg
+                            or "permission" in error_msg
+                        ):
+                            self._vprint(
+                                f"{self.log_prefix}   💡 Your API key was rejected by the provider. Check:",
+                                force=True,
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}      • Is the key valid? Run: hermes setup",
+                                force=True,
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}      • Does your account have access to {_model}?",
+                                force=True,
+                            )
                             if "openrouter" in str(_base).lower():
-                                self._vprint(f"{self.log_prefix}      • Check credits: https://openrouter.ai/settings/credits", force=True)
+                                self._vprint(
+                                    f"{self.log_prefix}      • Check credits: https://openrouter.ai/settings/credits",
+                                    force=True,
+                                )
                         else:
-                            self._vprint(f"{self.log_prefix}   💡 This type of error won't be fixed by retrying.", force=True)
-                        logging.error(f"{self.log_prefix}Non-retryable client error: {api_error}")
+                            self._vprint(
+                                f"{self.log_prefix}   💡 This type of error won't be fixed by retrying.",
+                                force=True,
+                            )
+                        logging.error(
+                            f"{self.log_prefix}Non-retryable client error: {api_error}"
+                        )
                         # Skip session persistence when the error is likely
                         # context-overflow related (status 400 + large session).
                         # Persisting the failed user message would make the
                         # session even larger, causing the same failure on the
                         # next attempt. (#1630)
-                        if status_code == 400 and (approx_tokens > 50000 or len(api_messages) > 80):
+                        if status_code == 400 and (
+                            approx_tokens > 50000 or len(api_messages) > 80
+                        ):
                             self._vprint(
                                 f"{self.log_prefix}⚠️  Skipping session persistence "
                                 f"for large failed session to prevent growth loop.",
@@ -1126,12 +1572,21 @@ class ConversationMixin:
                         if self._try_activate_fallback():
                             retry_count = 0
                             continue
-                        self._vprint(f"{self.log_prefix}❌ Max retries ({max_retries}) exceeded. Giving up.", force=True)
-                        logging.error(f"{self.log_prefix}API call failed after {max_retries} retries. Last error: {api_error}")
-                        logging.error(f"{self.log_prefix}Request details - Messages: {len(api_messages)}, Approx tokens: {approx_tokens:,}")
+                        self._vprint(
+                            f"{self.log_prefix}❌ Max retries ({max_retries}) exceeded. Giving up.",
+                            force=True,
+                        )
+                        logging.error(
+                            f"{self.log_prefix}API call failed after {max_retries} retries. Last error: {api_error}"
+                        )
+                        logging.error(
+                            f"{self.log_prefix}Request details - Messages: {len(api_messages)}, Approx tokens: {approx_tokens:,}"
+                        )
                         raise api_error
 
-                    wait_time = min(2 ** retry_count, 60)  # Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s, 60s
+                    wait_time = min(
+                        2**retry_count, 60
+                    )  # Exponential backoff: 2s, 4s, 8s, 16s, 32s, 60s, 60s
                     logger.warning(
                         "Retrying API call in %ss (attempt %s/%s) %s error=%s",
                         wait_time,
@@ -1145,7 +1600,10 @@ class ConversationMixin:
                     sleep_end = time.time() + wait_time
                     while time.time() < sleep_end:
                         if self._interrupt_requested:
-                            self._vprint(f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
+                            self._vprint(
+                                f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.",
+                                force=True,
+                            )
                             self._persist_session(messages, conversation_history)
                             self.clear_interrupt()
                             return {
@@ -1156,7 +1614,7 @@ class ConversationMixin:
                                 "interrupted": True,
                             }
                         time.sleep(0.2)  # Check interrupt every 200ms
-            
+
             # If the API call was interrupted, skip response processing
             if interrupted:
                 break
@@ -1173,28 +1631,40 @@ class ConversationMixin:
             # (e.g. repeated context-length errors that exhausted retry_count),
             # the `response` variable is still None. Break out cleanly.
             if response is None:
-                print(f"{self.log_prefix}❌ All API retries exhausted with no successful response.")
+                print(
+                    f"{self.log_prefix}❌ All API retries exhausted with no successful response."
+                )
                 self._persist_session(messages, conversation_history)
                 break
 
             try:
                 if self.api_mode == "codex_responses":
-                    assistant_message, finish_reason = self._normalize_codex_response(response)
+                    assistant_message, finish_reason = self._normalize_codex_response(
+                        response
+                    )
                 elif self.api_mode == "anthropic_messages":
                     from agent.anthropic_adapter import normalize_anthropic_response
+
                     assistant_message, finish_reason = normalize_anthropic_response(
-                        response, strip_tool_prefix=getattr(self, "_is_anthropic_oauth", False)
+                        response,
+                        strip_tool_prefix=getattr(self, "_is_anthropic_oauth", False),
                     )
                 else:
                     assistant_message = response.choices[0].message
-                
+
                 # Normalize content to string — some OpenAI-compatible servers
                 # (llama-server, etc.) return content as a dict or list instead
                 # of a plain string, which crashes downstream .strip() calls.
-                if assistant_message.content is not None and not isinstance(assistant_message.content, str):
+                if assistant_message.content is not None and not isinstance(
+                    assistant_message.content, str
+                ):
                     raw = assistant_message.content
                     if isinstance(raw, dict):
-                        assistant_message.content = raw.get("text", "") or raw.get("content", "") or json.dumps(raw)
+                        assistant_message.content = (
+                            raw.get("text", "")
+                            or raw.get("content", "")
+                            or json.dumps(raw)
+                        )
                     elif isinstance(raw, list):
                         # Multimodal content list — extract text parts
                         parts = []
@@ -1212,61 +1682,77 @@ class ConversationMixin:
                 # Handle assistant response
                 if assistant_message.content and not self.quiet_mode:
                     if self.verbose_logging:
-                        self._vprint(f"{self.log_prefix}🤖 Assistant: {assistant_message.content}")
+                        self._vprint(
+                            f"{self.log_prefix}🤖 Assistant: {assistant_message.content}"
+                        )
                     else:
-                        self._vprint(f"{self.log_prefix}🤖 Assistant: {assistant_message.content[:100]}{'...' if len(assistant_message.content) > 100 else ''}")
+                        self._vprint(
+                            f"{self.log_prefix}🤖 Assistant: {assistant_message.content[:100]}{'...' if len(assistant_message.content) > 100 else ''}"
+                        )
 
                 # Notify progress callback of model's thinking (used by subagent
                 # delegation to relay the child's reasoning to the parent display).
                 # Guard: only fire for subagents (_delegate_depth >= 1) to avoid
                 # spamming gateway platforms with the main agent's every thought.
-                if (assistant_message.content and self.tool_progress_callback
-                        and getattr(self, '_delegate_depth', 0) > 0):
+                if (
+                    assistant_message.content
+                    and self.tool_progress_callback
+                    and getattr(self, "_delegate_depth", 0) > 0
+                ):
                     _think_text = assistant_message.content.strip()
                     # Strip reasoning XML tags that shouldn't leak to parent display
                     _think_text = re.sub(
-                        r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '', _think_text
+                        r"</?(?:REASONING_SCRATCHPAD|think|reasoning)>", "", _think_text
                     ).strip()
-                    first_line = _think_text.split('\n')[0][:80] if _think_text else ""
+                    first_line = _think_text.split("\n")[0][:80] if _think_text else ""
                     if first_line:
                         try:
                             self.tool_progress_callback("_thinking", first_line)
                         except Exception:
                             pass
-                
+
                 # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
                 # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
                 if has_incomplete_scratchpad(assistant_message.content or ""):
-                    if not hasattr(self, '_incomplete_scratchpad_retries'):
+                    if not hasattr(self, "_incomplete_scratchpad_retries"):
                         self._incomplete_scratchpad_retries = 0
                     self._incomplete_scratchpad_retries += 1
-                    
-                    self._vprint(f"{self.log_prefix}⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)")
-                    
+
+                    self._vprint(
+                        f"{self.log_prefix}⚠️  Incomplete <REASONING_SCRATCHPAD> detected (opened but never closed)"
+                    )
+
                     if self._incomplete_scratchpad_retries <= 2:
-                        self._vprint(f"{self.log_prefix}🔄 Retrying API call ({self._incomplete_scratchpad_retries}/2)...")
+                        self._vprint(
+                            f"{self.log_prefix}🔄 Retrying API call ({self._incomplete_scratchpad_retries}/2)..."
+                        )
                         # Don't add the broken message, just retry
                         continue
                     else:
                         # Max retries - discard this turn and save as partial
-                        self._vprint(f"{self.log_prefix}❌ Max retries (2) for incomplete scratchpad. Saving as partial.", force=True)
+                        self._vprint(
+                            f"{self.log_prefix}❌ Max retries (2) for incomplete scratchpad. Saving as partial.",
+                            force=True,
+                        )
                         self._incomplete_scratchpad_retries = 0
-                        
-                        rolled_back_messages = self._get_messages_up_to_last_assistant(messages)
+
+                        rolled_back_messages = self._get_messages_up_to_last_assistant(
+                            messages
+                        )
                         self._cleanup_task_resources(effective_task_id)
                         self._persist_session(messages, conversation_history)
-                        
+
                         return {
                             "final_response": None,
                             "messages": rolled_back_messages,
                             "api_calls": api_call_count,
                             "completed": False,
                             "partial": True,
-                            "error": "Incomplete REASONING_SCRATCHPAD after 2 retries"
+                            "error": "Incomplete REASONING_SCRATCHPAD after 2 retries",
                         }
-                
+
                 # Reset incomplete scratchpad counter on clean response
-                if hasattr(self, '_incomplete_scratchpad_retries'):
+                if hasattr(self, "_incomplete_scratchpad_retries"):
                     self._incomplete_scratchpad_retries = 0
 
                 if self.api_mode == "codex_responses" and finish_reason == "incomplete":
@@ -1274,26 +1760,46 @@ class ConversationMixin:
                         self._codex_incomplete_retries = 0
                     self._codex_incomplete_retries += 1
 
-                    interim_msg = self._build_assistant_message(assistant_message, finish_reason)
-                    interim_has_content = bool((interim_msg.get("content") or "").strip())
-                    interim_has_reasoning = bool(interim_msg.get("reasoning", "").strip()) if isinstance(interim_msg.get("reasoning"), str) else False
-                    interim_has_codex_reasoning = bool(interim_msg.get("codex_reasoning_items"))
+                    interim_msg = self._build_assistant_message(
+                        assistant_message, finish_reason
+                    )
+                    interim_has_content = bool(
+                        (interim_msg.get("content") or "").strip()
+                    )
+                    interim_has_reasoning = (
+                        bool(interim_msg.get("reasoning", "").strip())
+                        if isinstance(interim_msg.get("reasoning"), str)
+                        else False
+                    )
+                    interim_has_codex_reasoning = bool(
+                        interim_msg.get("codex_reasoning_items")
+                    )
 
-                    if interim_has_content or interim_has_reasoning or interim_has_codex_reasoning:
+                    if (
+                        interim_has_content
+                        or interim_has_reasoning
+                        or interim_has_codex_reasoning
+                    ):
                         last_msg = messages[-1] if messages else None
                         # Duplicate detection: two consecutive incomplete assistant
                         # messages with identical content AND reasoning are collapsed.
                         # For reasoning-only messages (codex_reasoning_items differ but
                         # visible content/reasoning are both empty), we also compare
                         # the encrypted items to avoid silently dropping new state.
-                        last_codex_items = last_msg.get("codex_reasoning_items") if isinstance(last_msg, dict) else None
+                        last_codex_items = (
+                            last_msg.get("codex_reasoning_items")
+                            if isinstance(last_msg, dict)
+                            else None
+                        )
                         interim_codex_items = interim_msg.get("codex_reasoning_items")
                         duplicate_interim = (
                             isinstance(last_msg, dict)
                             and last_msg.get("role") == "assistant"
                             and last_msg.get("finish_reason") == "incomplete"
-                            and (last_msg.get("content") or "") == (interim_msg.get("content") or "")
-                            and (last_msg.get("reasoning") or "") == (interim_msg.get("reasoning") or "")
+                            and (last_msg.get("content") or "")
+                            == (interim_msg.get("content") or "")
+                            and (last_msg.get("reasoning") or "")
+                            == (interim_msg.get("reasoning") or "")
                             and last_codex_items == interim_codex_items
                         )
                         if not duplicate_interim:
@@ -1301,7 +1807,9 @@ class ConversationMixin:
 
                     if self._codex_incomplete_retries < 3:
                         if not self.quiet_mode:
-                            self._vprint(f"{self.log_prefix}↻ Codex response incomplete; continuing turn ({self._codex_incomplete_retries}/3)")
+                            self._vprint(
+                                f"{self.log_prefix}↻ Codex response incomplete; continuing turn ({self._codex_incomplete_retries}/3)"
+                            )
                         self._session_messages = messages
                         self._save_session_log(messages)
                         continue
@@ -1318,42 +1826,58 @@ class ConversationMixin:
                     }
                 elif hasattr(self, "_codex_incomplete_retries"):
                     self._codex_incomplete_retries = 0
-                
+
                 # Check for tool calls
                 if assistant_message.tool_calls:
                     if not self.quiet_mode:
-                        self._vprint(f"{self.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
-                    
+                        self._vprint(
+                            f"{self.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)..."
+                        )
+
                     if self.verbose_logging:
                         for tc in assistant_message.tool_calls:
-                            logging.debug(f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}...")
-                    
+                            logging.debug(
+                                f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}..."
+                            )
+
                     # Validate tool call names - detect model hallucinations
                     # Repair mismatched tool names before validating
                     for tc in assistant_message.tool_calls:
                         if tc.function.name not in self.valid_tool_names:
                             repaired = self._repair_tool_call(tc.function.name)
                             if repaired:
-                                print(f"{self.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'")
+                                print(
+                                    f"{self.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'"
+                                )
                                 tc.function.name = repaired
                     invalid_tool_calls = [
-                        tc.function.name for tc in assistant_message.tool_calls
+                        tc.function.name
+                        for tc in assistant_message.tool_calls
                         if tc.function.name not in self.valid_tool_names
                     ]
                     if invalid_tool_calls:
                         # Track retries for invalid tool calls
-                        if not hasattr(self, '_invalid_tool_retries'):
+                        if not hasattr(self, "_invalid_tool_retries"):
                             self._invalid_tool_retries = 0
                         self._invalid_tool_retries += 1
 
                         # Return helpful error to model — model can self-correct next turn
                         available = ", ".join(sorted(self.valid_tool_names))
                         invalid_name = invalid_tool_calls[0]
-                        invalid_preview = invalid_name[:80] + "..." if len(invalid_name) > 80 else invalid_name
-                        self._vprint(f"{self.log_prefix}⚠️  Unknown tool '{invalid_preview}' — sending error to model for self-correction ({self._invalid_tool_retries}/3)")
+                        invalid_preview = (
+                            invalid_name[:80] + "..."
+                            if len(invalid_name) > 80
+                            else invalid_name
+                        )
+                        self._vprint(
+                            f"{self.log_prefix}⚠️  Unknown tool '{invalid_preview}' — sending error to model for self-correction ({self._invalid_tool_retries}/3)"
+                        )
 
                         if self._invalid_tool_retries >= 3:
-                            self._vprint(f"{self.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True)
+                            self._vprint(
+                                f"{self.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.",
+                                force=True,
+                            )
                             self._invalid_tool_retries = 0
                             self._persist_session(messages, conversation_history)
                             return {
@@ -1362,26 +1886,30 @@ class ConversationMixin:
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
-                                "error": f"Model generated invalid tool call: {invalid_preview}"
+                                "error": f"Model generated invalid tool call: {invalid_preview}",
                             }
 
-                        assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
+                        assistant_msg = self._build_assistant_message(
+                            assistant_message, finish_reason
+                        )
                         messages.append(assistant_msg)
                         for tc in assistant_message.tool_calls:
                             if tc.function.name not in self.valid_tool_names:
                                 content = f"Tool '{tc.function.name}' does not exist. Available tools: {available}"
                             else:
                                 content = f"Skipped: another tool call in this turn used an invalid name. Please retry this tool call."
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc.id,
-                                "content": content,
-                            })
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tc.id,
+                                    "content": content,
+                                }
+                            )
                         continue
                     # Reset retry counter on successful tool call validation
-                    if hasattr(self, '_invalid_tool_retries'):
+                    if hasattr(self, "_invalid_tool_retries"):
                         self._invalid_tool_retries = 0
-                    
+
                     # Validate tool call arguments are valid JSON
                     # Handle empty strings as empty objects (common model quirk)
                     invalid_json_args = []
@@ -1401,33 +1929,45 @@ class ConversationMixin:
                             json.loads(args)
                         except json.JSONDecodeError as e:
                             invalid_json_args.append((tc.function.name, str(e)))
-                    
+
                     if invalid_json_args:
                         # Track retries for invalid JSON arguments
                         self._invalid_json_retries += 1
-                        
+
                         tool_name, error_msg = invalid_json_args[0]
-                        self._vprint(f"{self.log_prefix}⚠️  Invalid JSON in tool call arguments for '{tool_name}': {error_msg}")
-                        
+                        self._vprint(
+                            f"{self.log_prefix}⚠️  Invalid JSON in tool call arguments for '{tool_name}': {error_msg}"
+                        )
+
                         if self._invalid_json_retries < 3:
-                            self._vprint(f"{self.log_prefix}🔄 Retrying API call ({self._invalid_json_retries}/3)...")
+                            self._vprint(
+                                f"{self.log_prefix}🔄 Retrying API call ({self._invalid_json_retries}/3)..."
+                            )
                             # Don't add anything to messages, just retry the API call
                             continue
                         else:
                             # Instead of returning partial, inject tool error results so the model can recover.
                             # Using tool results (not user messages) preserves role alternation.
-                            self._vprint(f"{self.log_prefix}⚠️  Injecting recovery tool results for invalid JSON...")
+                            self._vprint(
+                                f"{self.log_prefix}⚠️  Injecting recovery tool results for invalid JSON..."
+                            )
                             self._invalid_json_retries = 0  # Reset for next attempt
-                            
+
                             # Append the assistant message with its (broken) tool_calls
-                            recovery_assistant = self._build_assistant_message(assistant_message, finish_reason)
+                            recovery_assistant = self._build_assistant_message(
+                                assistant_message, finish_reason
+                            )
                             messages.append(recovery_assistant)
-                            
+
                             # Respond with tool error results for each tool call
                             invalid_names = {name for name, _ in invalid_json_args}
                             for tc in assistant_message.tool_calls:
                                 if tc.function.name in invalid_names:
-                                    err = next(e for n, e in invalid_json_args if n == tc.function.name)
+                                    err = next(
+                                        e
+                                        for n, e in invalid_json_args
+                                        if n == tc.function.name
+                                    )
                                     tool_result = (
                                         f"Error: Invalid JSON arguments. {err}. "
                                         f"For tools with no required parameters, use an empty object: {{}}. "
@@ -1435,13 +1975,15 @@ class ConversationMixin:
                                     )
                                 else:
                                     tool_result = "Skipped: other tool call in this response had invalid JSON."
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tc.id,
-                                    "content": tool_result,
-                                })
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tc.id,
+                                        "content": tool_result,
+                                    }
+                                )
                             continue
-                    
+
                     # Reset retry counter on successful JSON validation
                     self._invalid_json_retries = 0
 
@@ -1453,14 +1995,18 @@ class ConversationMixin:
                         assistant_message.tool_calls
                     )
 
-                    assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
-                    
+                    assistant_msg = self._build_assistant_message(
+                        assistant_message, finish_reason
+                    )
+
                     # If this turn has both content AND tool_calls, capture the content
                     # as a fallback final response. Common pattern: model delivers its
                     # answer and calls memory/skill tools as a side-effect in the same
                     # turn. If the follow-up turn after tools is empty, we use this.
                     turn_content = assistant_message.content or ""
-                    if turn_content and self._has_content_after_think_block(turn_content):
+                    if turn_content and self._has_content_after_think_block(
+                        turn_content
+                    ):
                         self._last_content_with_tools = turn_content
                         # The response was already streamed to the user in the
                         # response box.  The remaining tool calls (memory, skill,
@@ -1472,7 +2018,7 @@ class ConversationMixin:
                             clean = self._strip_think_blocks(turn_content).strip()
                             if clean:
                                 self._vprint(f"  ┊ 💬 {clean}")
-                    
+
                     messages.append(assistant_msg)
 
                     # Close any open streaming display (response box, reasoning
@@ -1488,7 +2034,9 @@ class ConversationMixin:
                             pass
 
                     _msg_count_before_tools = len(messages)
-                    self._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                    self._execute_tool_calls(
+                        assistant_message, messages, effective_task_id, api_call_count
+                    )
 
                     # Signal that a paragraph break is needed before the next
                     # streamed text.  We don't emit it immediately because
@@ -1501,10 +2049,12 @@ class ConversationMixin:
                     # Refund the iteration if the ONLY tool(s) called were
                     # execute_code (programmatic tool calling).  These are
                     # cheap RPC-style calls that shouldn't eat the budget.
-                    _tc_names = {tc.function.name for tc in assistant_message.tool_calls}
+                    _tc_names = {
+                        tc.function.name for tc in assistant_message.tool_calls
+                    }
                     if _tc_names == {"execute_code"}:
                         self.iteration_budget.refund()
-                    
+
                     # Estimate next prompt size using real token counts from the
                     # last API response + rough estimate of newly appended tool
                     # results.  This catches cases where tool results push the
@@ -1512,11 +2062,14 @@ class ConversationMixin:
                     # (e.g. large file reads, web extractions).
                     _compressor = self.context_compressor
                     _new_tool_msgs = messages[_msg_count_before_tools:]
-                    _new_chars = sum(len(str(m.get("content", "") or "")) for m in _new_tool_msgs)
+                    _new_chars = sum(
+                        len(str(m.get("content", "") or "")) for m in _new_tool_msgs
+                    )
                     _estimated_next_prompt = (
                         _compressor.last_prompt_tokens
                         + _compressor.last_completion_tokens
-                        + _new_chars // 3  # conservative: JSON-heavy tool results ≈ 3 chars/token
+                        + _new_chars
+                        // 3  # conservative: JSON-heavy tool results ≈ 3 chars/token
                     )
 
                     # ── Context pressure warnings (user-facing only) ──────────
@@ -1526,57 +2079,79 @@ class ConversationMixin:
                     # Does not inject into messages — just prints to CLI output
                     # and fires status_callback for gateway platforms.
                     if _compressor.threshold_tokens > 0:
-                        _compaction_progress = _estimated_next_prompt / _compressor.threshold_tokens
+                        _compaction_progress = (
+                            _estimated_next_prompt / _compressor.threshold_tokens
+                        )
                         if _compaction_progress >= 0.85 and not self._context_70_warned:
                             self._context_70_warned = True
-                            self._context_50_warned = True  # skip first tier if we jumped past it
-                            self._emit_context_pressure(_compaction_progress, _compressor)
-                        elif _compaction_progress >= 0.60 and not self._context_50_warned:
+                            self._context_50_warned = (
+                                True  # skip first tier if we jumped past it
+                            )
+                            self._emit_context_pressure(
+                                _compaction_progress, _compressor
+                            )
+                        elif (
+                            _compaction_progress >= 0.60 and not self._context_50_warned
+                        ):
                             self._context_50_warned = True
-                            self._emit_context_pressure(_compaction_progress, _compressor)
+                            self._emit_context_pressure(
+                                _compaction_progress, _compressor
+                            )
 
-                    if self.compression_enabled and _compressor.should_compress(_estimated_next_prompt):
+                    if self.compression_enabled and _compressor.should_compress(
+                        _estimated_next_prompt
+                    ):
                         # Record context compaction for statistics
                         tokens_before = self.context_compressor.last_prompt_tokens
                         messages, active_system_prompt = self._compress_context(
-                            messages, system_message,
+                            messages,
+                            system_message,
                             approx_tokens=tokens_before,
                             task_id=effective_task_id,
                         )
                         tokens_after = self.context_compressor.last_prompt_tokens
-                        record_context_compaction(tokens_before, tokens_after, self.provider)
-                    
+                        record_context_compaction(
+                            tokens_before, tokens_after, self.provider
+                        )
+
                     # Save session log incrementally (so progress is visible even if interrupted)
                     self._session_messages = messages
                     self._save_session_log(messages)
-                    
+
                     # Continue loop for next response
                     continue
-                
+
                 else:
                     # No tool calls - this is the final response
                     final_response = assistant_message.content or ""
-                    
+
                     # Check if response only has think block with no actual content after it
                     if not self._has_content_after_think_block(final_response):
                         # If the previous turn already delivered real content alongside
                         # tool calls (e.g. "You're welcome!" + memory save), the model
                         # has nothing more to say. Use the earlier content immediately
                         # instead of wasting API calls on retries that won't help.
-                        fallback = getattr(self, '_last_content_with_tools', None)
+                        fallback = getattr(self, "_last_content_with_tools", None)
                         if fallback:
-                            logger.debug("Empty follow-up after tool calls — using prior turn content as final response")
+                            logger.debug(
+                                "Empty follow-up after tool calls — using prior turn content as final response"
+                            )
                             self._last_content_with_tools = None
                             self._empty_content_retries = 0
                             for i in range(len(messages) - 1, -1, -1):
                                 msg = messages[i]
-                                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                                if msg.get("role") == "assistant" and msg.get(
+                                    "tool_calls"
+                                ):
                                     tool_names = []
                                     for tc in msg["tool_calls"]:
-                                        if not tc or not isinstance(tc, dict): continue
+                                        if not tc or not isinstance(tc, dict):
+                                            continue
                                         fn = tc.get("function", {})
                                         tool_names.append(fn.get("name", "unknown"))
-                                    msg["content"] = f"Calling the {', '.join(tool_names)} tool{'s' if len(tool_names) > 1 else ''}..."
+                                    msg["content"] = (
+                                        f"Calling the {', '.join(tool_names)} tool{'s' if len(tool_names) > 1 else ''}..."
+                                    )
                                     break
                             final_response = self._strip_think_blocks(fallback).strip()
                             self._response_was_previewed = True
@@ -1584,52 +2159,81 @@ class ConversationMixin:
 
                         # No fallback available — this is a genuine empty response.
                         # Retry in case the model just had a bad generation.
-                        if not hasattr(self, '_empty_content_retries'):
+                        if not hasattr(self, "_empty_content_retries"):
                             self._empty_content_retries = 0
                         self._empty_content_retries += 1
-                        
+
                         reasoning_text = self._extract_reasoning(assistant_message)
-                        self._vprint(f"{self.log_prefix}⚠️  Response only contains think block with no content after it")
+                        self._vprint(
+                            f"{self.log_prefix}⚠️  Response only contains think block with no content after it"
+                        )
                         if reasoning_text:
-                            reasoning_preview = reasoning_text[:500] + "..." if len(reasoning_text) > 500 else reasoning_text
-                            self._vprint(f"{self.log_prefix}   Reasoning: {reasoning_preview}")
+                            reasoning_preview = (
+                                reasoning_text[:500] + "..."
+                                if len(reasoning_text) > 500
+                                else reasoning_text
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}   Reasoning: {reasoning_preview}"
+                            )
                         else:
-                            content_preview = final_response[:80] + "..." if len(final_response) > 80 else final_response
-                            self._vprint(f"{self.log_prefix}   Content: '{content_preview}'")
-                        
+                            content_preview = (
+                                final_response[:80] + "..."
+                                if len(final_response) > 80
+                                else final_response
+                            )
+                            self._vprint(
+                                f"{self.log_prefix}   Content: '{content_preview}'"
+                            )
+
                         if self._empty_content_retries < 3:
-                            self._vprint(f"{self.log_prefix}🔄 Retrying API call ({self._empty_content_retries}/3)...")
+                            self._vprint(
+                                f"{self.log_prefix}🔄 Retrying API call ({self._empty_content_retries}/3)..."
+                            )
                             continue
                         else:
-                            self._vprint(f"{self.log_prefix}❌ Max retries (3) for empty content exceeded.", force=True)
+                            self._vprint(
+                                f"{self.log_prefix}❌ Max retries (3) for empty content exceeded.",
+                                force=True,
+                            )
                             self._empty_content_retries = 0
-                            
+
                             # If a prior tool_calls turn had real content, salvage it:
                             # rewrite that turn's content to a brief tool description,
                             # and use the original content as the final response here.
-                            fallback = getattr(self, '_last_content_with_tools', None)
+                            fallback = getattr(self, "_last_content_with_tools", None)
                             if fallback:
                                 self._last_content_with_tools = None
                                 # Find the last assistant message with tool_calls and rewrite it
                                 for i in range(len(messages) - 1, -1, -1):
                                     msg = messages[i]
-                                    if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                                    if msg.get("role") == "assistant" and msg.get(
+                                        "tool_calls"
+                                    ):
                                         tool_names = []
                                         for tc in msg["tool_calls"]:
-                                            if not tc or not isinstance(tc, dict): continue
+                                            if not tc or not isinstance(tc, dict):
+                                                continue
                                             fn = tc.get("function", {})
                                             tool_names.append(fn.get("name", "unknown"))
-                                        msg["content"] = f"Calling the {', '.join(tool_names)} tool{'s' if len(tool_names) > 1 else ''}..."
+                                        msg["content"] = (
+                                            f"Calling the {', '.join(tool_names)} tool{'s' if len(tool_names) > 1 else ''}..."
+                                        )
                                         break
                                 # Strip <think> blocks from fallback content for user display
-                                final_response = self._strip_think_blocks(fallback).strip()
+                                final_response = self._strip_think_blocks(
+                                    fallback
+                                ).strip()
                                 self._response_was_previewed = True
                                 break
-                            
+
                             # No fallback -- if reasoning_text exists, the model put its
                             # entire response inside <think> tags; use that as the content.
                             if reasoning_text:
-                                self._vprint(f"{self.log_prefix}Using reasoning as response content (model wrapped entire response in think tags).", force=True)
+                                self._vprint(
+                                    f"{self.log_prefix}Using reasoning as response content (model wrapped entire response in think tags).",
+                                    force=True,
+                                )
                                 final_response = reasoning_text
                                 empty_msg = {
                                     "role": "assistant",
@@ -1658,11 +2262,11 @@ class ConversationMixin:
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
-                                "error": "Model generated only think blocks with no actual response after 3 retries"
+                                "error": "Model generated only think blocks with no actual response after 3 retries",
                             }
-                    
+
                     # Reset retry counter on successful content
-                    if hasattr(self, '_empty_content_retries'):
+                    if hasattr(self, "_empty_content_retries"):
                         self._empty_content_retries = 0
 
                     if (
@@ -1676,7 +2280,9 @@ class ConversationMixin:
                         )
                     ):
                         codex_ack_continuations += 1
-                        interim_msg = self._build_assistant_message(assistant_message, "incomplete")
+                        interim_msg = self._build_assistant_message(
+                            assistant_message, "incomplete"
+                        )
                         messages.append(interim_msg)
 
                         continue_msg = {
@@ -1697,28 +2303,32 @@ class ConversationMixin:
                         final_response = truncated_response_prefix + final_response
                         truncated_response_prefix = ""
                         length_continue_retries = 0
-                    
+
                     # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)
                     final_response = self._strip_think_blocks(final_response).strip()
-                    
-                    final_msg = self._build_assistant_message(assistant_message, finish_reason)
-                    
+
+                    final_msg = self._build_assistant_message(
+                        assistant_message, finish_reason
+                    )
+
                     messages.append(final_msg)
-                    
+
                     if not self.quiet_mode:
-                        self._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
+                        self._safe_print(
+                            f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)"
+                        )
                     break
-                
+
             except Exception as e:
                 error_msg = f"Error during OpenAI-compatible API call #{api_call_count}: {str(e)}"
                 try:
                     print(f"❌ {error_msg}")
                 except OSError:
                     logger.error(error_msg)
-                
+
                 if self.verbose_logging:
                     logging.exception("Detailed error information:")
-                
+
                 # If an assistant message with tool_calls was already appended,
                 # the API expects a role="tool" result for every tool_call_id.
                 # Fill in error results for any that weren't answered yet.
@@ -1732,11 +2342,12 @@ class ConversationMixin:
                     if msg.get("role") == "assistant" and msg.get("tool_calls"):
                         answered_ids = {
                             m["tool_call_id"]
-                            for m in messages[idx + 1:]
+                            for m in messages[idx + 1 :]
                             if isinstance(m, dict) and m.get("role") == "tool"
                         }
                         for tc in msg["tool_calls"]:
-                            if not tc or not isinstance(tc, dict): continue
+                            if not tc or not isinstance(tc, dict):
+                                continue
                             if tc["id"] not in answered_ids:
                                 err_msg = {
                                     "role": "tool",
@@ -1746,7 +2357,7 @@ class ConversationMixin:
                                 messages.append(err_msg)
                         pending_handled = True
                     break
-                
+
                 # Non-tool errors don't need a synthetic message injected.
                 # The error is already printed to the user (line above), and
                 # the retry loop continues.  Injecting a fake user/assistant
@@ -1755,20 +2366,24 @@ class ConversationMixin:
 
                 # If we're near the limit, break to avoid infinite loops
                 if api_call_count >= self.max_iterations - 1:
-                    final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
+                    final_response = (
+                        f"I apologize, but I encountered repeated errors: {error_msg}"
+                    )
                     # Append as assistant so the history stays valid for
                     # session resume (avoids consecutive user messages).
                     messages.append({"role": "assistant", "content": final_response})
                     break
-        
+
         if final_response is None and (
             api_call_count >= self.max_iterations
             or self.iteration_budget.remaining <= 0
         ):
             if self.iteration_budget.remaining <= 0 and not self.quiet_mode:
-                print(f"\n⚠️  Session iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} used, including subagents)")
+                print(
+                    f"\n⚠️  Session iteration budget exhausted ({self.iteration_budget.used}/{self.iteration_budget.max_total} used, including subagents)"
+                )
             final_response = self._handle_max_iterations(messages, api_call_count)
-        
+
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
 
@@ -1814,17 +2429,20 @@ class ConversationMixin:
             "prompt_tokens": self.session_prompt_tokens,
             "completion_tokens": self.session_completion_tokens,
             "total_tokens": self.session_total_tokens,
-            "last_prompt_tokens": getattr(self.context_compressor, "last_prompt_tokens", 0) or 0,
+            "last_prompt_tokens": getattr(
+                self.context_compressor, "last_prompt_tokens", 0
+            )
+            or 0,
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
         }
         self._response_was_previewed = False
-        
+
         # Include interrupt message if one triggered the interrupt
         if interrupted and self._interrupt_message:
             result["interrupt_message"] = self._interrupt_message
-        
+
         # Clear interrupt state after handling
         self.clear_interrupt()
 
@@ -1833,15 +2451,21 @@ class ConversationMixin:
 
         # Check skill trigger NOW — based on how many tool iterations THIS turn used.
         _should_review_skills = False
-        if (self._skill_nudge_interval > 0
-                and self._iters_since_skill >= self._skill_nudge_interval
-                and "skill_manage" in self.valid_tool_names):
+        if (
+            self._skill_nudge_interval > 0
+            and self._iters_since_skill >= self._skill_nudge_interval
+            and "skill_manage" in self.valid_tool_names
+        ):
             _should_review_skills = True
             self._iters_since_skill = 0
 
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.
-        if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+        if (
+            final_response
+            and not interrupted
+            and (_should_review_memory or _should_review_skills)
+        ):
             try:
                 self._spawn_background_review(
                     messages_snapshot=list(messages),
@@ -1852,4 +2476,3 @@ class ConversationMixin:
                 pass  # Background review is best-effort
 
         return result
-
