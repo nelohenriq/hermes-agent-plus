@@ -102,6 +102,7 @@ hermes_cli/doctor.py
 hermes_cli/env_loader.py
 hermes_cli/gateway.py
 hermes_cli/main.py
+hermes_cli/mcp_config.py
 hermes_cli/models.py
 hermes_cli/pairing.py
 hermes_cli/plugins.py
@@ -216,6 +217,7 @@ tools/homeassistant_tool.py
 tools/honcho_tools.py
 tools/image_generation_tool.py
 tools/interrupt.py
+tools/mcp_oauth.py
 tools/mcp_tool.py
 tools/memory_tool.py
 tools/mixture_of_agents_tool.py

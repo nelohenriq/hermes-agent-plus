@@ -39,6 +39,7 @@ hermes-agent[homeassistant]
 hermes-agent[sms]
 hermes-agent[acp]
 hermes-agent[voice]
+hermes-agent[dingtalk]
 
 [cli]
 simple-term-menu
@@ -54,6 +55,9 @@ pytest
 pytest-asyncio
 pytest-xdist
 mcp>=1.2.0
+
+[dingtalk]
+dingtalk-stream>=0.1.0
 
 [homeassistant]
 aiohttp>=3.9.0

@@ -70,6 +70,8 @@ Provides-Extra: sms
 Requires-Dist: aiohttp>=3.9.0; extra == "sms"
 Provides-Extra: acp
 Requires-Dist: agent-client-protocol<1.0,>=0.8.1; extra == "acp"
+Provides-Extra: dingtalk
+Requires-Dist: dingtalk-stream>=0.1.0; extra == "dingtalk"
 Provides-Extra: rl
 Requires-Dist: atroposlib @ git+https://github.com/NousResearch/atropos.git ; extra == "rl"
 Requires-Dist: tinker @ git+https://github.com/thinking-machines-lab/tinker.git ; extra == "rl"
@@ -94,6 +96,7 @@ Requires-Dist: hermes-agent[homeassistant]; extra == "all"
 Requires-Dist: hermes-agent[sms]; extra == "all"
 Requires-Dist: hermes-agent[acp]; extra == "all"
 Requires-Dist: hermes-agent[voice]; extra == "all"
+Requires-Dist: hermes-agent[dingtalk]; extra == "all"
 Dynamic: license-file
 
 <p align="center">
